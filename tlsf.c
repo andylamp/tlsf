@@ -590,12 +590,12 @@ static void remove_free_block(control_t* control, block_header_t* block, int fl,
 		/* If the new head is null, clear the bitmap. */
 		if (next == &control->block_null)
 		{
-			control->sl_bitmap[fl] &= ~(1 << sl);
+			control->sl_bitmap[fl] &= ~(1U << sl);
 
 			/* If the second bitmap is now empty, clear the fl bitmap. */
 			if (!control->sl_bitmap[fl])
 			{
-				control->fl_bitmap &= ~(1 << fl);
+				control->fl_bitmap &= ~(1U << fl);
 			}
 		}
 	}
@@ -618,8 +618,8 @@ static void insert_free_block(control_t* control, block_header_t* block, int fl,
 	** and second-level bitmaps appropriately.
 	*/
 	control->blocks[fl][sl] = block;
-	control->fl_bitmap |= (1 << fl);
-	control->sl_bitmap[fl] |= (1 << sl);
+	control->fl_bitmap |= (1U << fl);
+	control->sl_bitmap[fl] |= (1U << sl);
 }
 
 /* Remove a given block from the free list. */
