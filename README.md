@@ -27,6 +27,12 @@ It also leverages the TLSF 2.0 improvement to shrink the per-block overhead from
 
 History
 -------
+
+2017/06/26
+  * added an example ([example][./example.c])
+  * moved build toolchain to `autotools`
+  * added a build script ([`build.sh`][./build.sh])
+
 2016/04/10 - v3.1
   * Code moved to github
   * tlsfbits.h rolled into tlsf.c
