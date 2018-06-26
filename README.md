@@ -29,9 +29,9 @@ History
 -------
 
 2017/06/26
-  * added an example ([example][./example.c])
+  * added an example ([example](./example.c))
   * moved build toolchain to `autotools`
-  * added a build script ([`build.sh`][./build.sh])
+  * added a build script ([`build.sh`](./build.sh))
 
 2016/04/10 - v3.1
   * Code moved to github
