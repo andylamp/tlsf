@@ -1,0 +1,10 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: nio-tlsf
+Description: Two-Level Segregated Fit memory allocator library modified for Niometrics
+Version: @VERSION@
+Libs: -L${libdir} -lnio-tlsf
+Cflags: -I${includedir}/
