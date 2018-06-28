@@ -14,36 +14,36 @@
 #endif
 
 /*
-** Architecture-specific bit manipulation routines.
-**
-** TLSF achieves O(1) cost for malloc and free operations by limiting
-** the search for a free block to a free list of guaranteed size
-** adequate to fulfill the request, combined with efficient free list
-** queries using bitmasks and architecture-specific bit-manipulation
-** routines.
-**
-** Most modern processors provide instructions to count leading zeroes
-** in a word, find the lowest and highest set bit, etc. These
-** specific implementations will be used when available, falling back
-** to a reasonably efficient generic implementation.
-**
-** NOTE: TLSF spec relies on ffs/fls returning value 0..31.
-** ffs/fls return 1-32 by default, returning 0 for error.
-*/
+ * Architecture-specific bit manipulation routines.
+ *
+ * TLSF achieves O(1) cost for malloc and free operations by limiting
+ * the search for a free block to a free list of guaranteed size
+ * adequate to fulfill the request, combined with efficient free list
+ * queries using bitmasks and architecture-specific bit-manipulation
+ * routines.
+ *
+ * Most modern processors provide instructions to count leading zeroes
+ * in a word, find the lowest and highest set bit, etc. These
+ * specific implementations will be used when available, falling back
+ * to a reasonably efficient generic implementation.
+ *
+ * NOTE: TLSF spec relies on ffs/fls returning value 0..31.
+ * ffs/fls return 1-32 by default, returning 0 for error.
+ */
 
 /*
-** Detect whether or not we are building for a 32- or 64-bit (LP/LLP)
-** architecture. There is no reliable portable method at compile-time.
-*/
+ * Detect whether or not we are building for a 32- or 64-bit (LP/LLP)
+ * architecture. There is no reliable portable method at compile-time.
+ */
 #if defined (__alpha__) || defined (__ia64__) || defined (__x86_64__) \
 	|| defined (_WIN64) || defined (__LP64__) || defined (__LLP64__)
 #define TLSF_64BIT
 #endif
 
 /*
-** gcc 3.4 and above have builtin support, specialized for architecture.
-** Some compilers masquerade as gcc; patchlevel test filters them out.
-*/
+ * gcc 3.4 and above have builtin support, specialized for architecture.
+ * Some compilers masquerade as gcc; patchlevel test filters them out.
+ */
 #if defined (__GNUC__) && (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4)) \
 	&& defined (__GNUC_PATCHLEVEL__)
 
@@ -195,15 +195,15 @@ tlsf_decl int tlsf_fls_sizet(size_t size)
 #undef tlsf_decl
 
 /*
-** Constants.
-*/
+ * Constants.
+ */
 
 /* Public constants: may be modified. */
 enum tlsf_public {
 	/* log2 of number of linear subdivisions of block sizes. Larger
-	** values require more memory in the control structure. Values of
-	** 4 or 5 are typical.
-	*/
+	 * values require more memory in the control structure. Values of
+	 * 4 or 5 are typical.
+	 */
 	SL_INDEX_COUNT_LOG2 = 5,
 };
 
@@ -220,21 +220,21 @@ enum tlsf_private
 	ALIGN_SIZE = (1 << ALIGN_SIZE_LOG2),
 
 	/*
-	** We support allocations of sizes up to (1 << FL_INDEX_MAX) bits.
-	** However, because we linearly subdivide the second-level lists, and
-	** our minimum size granularity is 4 bytes, it doesn't make sense to
-	** create first-level lists for sizes smaller than SL_INDEX_COUNT * 4,
-	** or (1 << (SL_INDEX_COUNT_LOG2 + 2)) bytes, as there we will be
-	** trying to split size ranges into more slots than we have available.
-	** Instead, we calculate the minimum threshold size, and place all
-	** blocks below that size into the 0th first-level list.
-	*/
+	 * We support allocations of sizes up to (1 << FL_INDEX_MAX) bits.
+	 * However, because we linearly subdivide the second-level lists, and
+	 * our minimum size granularity is 4 bytes, it doesn't make sense to
+	 * create first-level lists for sizes smaller than SL_INDEX_COUNT * 4,
+	 * or (1 << (SL_INDEX_COUNT_LOG2 + 2)) bytes, as there we will be
+	 * trying to split size ranges into more slots than we have available.
+	 * Instead, we calculate the minimum threshold size, and place all
+	 * blocks below that size into the 0th first-level list.
+	 */
 
 #if defined (TLSF_64BIT)
 	/*
-	** TODO: We can increase this to support larger sizes, at the expense
-	** of more overhead in the TLSF structure.
-	*/
+	 * TODO: We can increase this to support larger sizes, at the expense
+	 * of more overhead in the TLSF structure.
+	 */
 	FL_INDEX_MAX = 32,
 #else
 	FL_INDEX_MAX = 30,
@@ -247,23 +247,23 @@ enum tlsf_private
 };
 
 /*
-** Cast and min/max macros.
-*/
+ * Cast and min/max macros.
+ */
 
 #define tlsf_cast(t, exp)	((t) (exp))
 #define tlsf_min(a, b)		((a) < (b) ? (a) : (b))
 #define tlsf_max(a, b)		((a) > (b) ? (a) : (b))
 
 /*
-** Set assert macro, if it has not been provided by the user.
-*/
+ * Set assert macro, if it has not been provided by the user.
+ */
 #if !defined (tlsf_assert)
 #define tlsf_assert assert
 #endif
 
 /*
-** Static assertion mechanism.
-*/
+ * Static assertion mechanism.
+ */
 
 #define _tlsf_glue2(x, y) x ## y
 #define _tlsf_glue(x, y) _tlsf_glue2(x, y)
@@ -282,19 +282,19 @@ tlsf_static_assert(sizeof(unsigned int) * CHAR_BIT >= SL_INDEX_COUNT);
 tlsf_static_assert(ALIGN_SIZE == SMALL_BLOCK_SIZE / SL_INDEX_COUNT);
 
 /*
-** Data structures and associated constants.
-*/
+ * Data structures and associated constants.
+ */
 
 /*
-** Block header structure.
-**
-** There are several implementation subtleties involved:
-** - The prev_phys_block field is only valid if the previous block is free.
-** - The prev_phys_block field is actually stored at the end of the
-**   previous block. It appears at the beginning of this structure only to
-**   simplify the implementation.
-** - The next_free / prev_free fields are only valid if the block is free.
-*/
+ * Block header structure.
+ *
+ * There are several implementation subtleties involved:
+ * - The prev_phys_block field is only valid if the previous block is free.
+ * - The prev_phys_block field is actually stored at the end of the
+ *   previous block. It appears at the beginning of this structure only to
+ *   simplify the implementation.
+ * - The next_free / prev_free fields are only valid if the block is free.
+ */
 typedef struct block_header_t {
 	/* Points to the previous physical block. */
 	struct block_header_t *prev_phys_block;
@@ -308,18 +308,18 @@ typedef struct block_header_t {
 } block_header_t;
 
 /*
-** Since block sizes are always at least a multiple of 4, the two least
-** significant bits of the size field are used to store the block status:
-** - bit 0: whether block is busy or free
-** - bit 1: whether previous block is busy or free
-*/
+ * Since block sizes are always at least a multiple of 4, the two least
+ * significant bits of the size field are used to store the block status:
+ * - bit 0: whether block is busy or free
+ * - bit 1: whether previous block is busy or free
+ */
 static const size_t block_header_free_bit = 1 << 0;
 static const size_t block_header_prev_free_bit = 1 << 1;
 
 /*
-** The size of the block header exposed to used blocks is the size field.
-** The prev_phys_block field is stored *inside* the previous free block.
-*/
+ * The size of the block header exposed to used blocks is the size field.
+ * The prev_phys_block field is stored *inside* the previous free block.
+ */
 static const size_t block_header_overhead = sizeof(size_t);
 
 /* User data starts directly after the size field in a used block. */
@@ -327,10 +327,10 @@ static const size_t block_start_offset =
 	offsetof(block_header_t, size) + sizeof(size_t);
 
 /*
-** A free block must be large enough to store its header minus the size of
-** the prev_phys_block field, and no larger than the number of addressable
-** bits for FL_INDEX.
-*/
+ * A free block must be large enough to store its header minus the size of
+ * the prev_phys_block field, and no larger than the number of addressable
+ * bits for FL_INDEX.
+ */
 static const size_t block_size_min =
 	sizeof(block_header_t) - sizeof(block_header_t *);
 static const size_t block_size_max = tlsf_cast(size_t, 1) << FL_INDEX_MAX;
@@ -353,8 +353,8 @@ typedef struct control_t {
 typedef ptrdiff_t tlsfptr_t;
 
 /*
-** block_header_t member functions.
-*/
+ * block_header_t member functions.
+ */
 
 static size_t block_size(const block_header_t *block)
 {
@@ -480,9 +480,9 @@ static void *align_ptr(const void *ptr, size_t align)
 }
 
 /*
-** Adjust an allocation size to be aligned to word size, and no smaller
-** than internal minimum.
-*/
+ * Adjust an allocation size to be aligned to word size, and no smaller
+ * than internal minimum.
+ */
 static size_t adjust_request_size(size_t size, size_t align)
 {
 	size_t adjust = 0;
@@ -498,9 +498,9 @@ static size_t adjust_request_size(size_t size, size_t align)
 }
 
 /*
-** TLSF utility functions. In most cases, these are direct translations of
-** the documentation found in the white paper.
-*/
+ * TLSF utility functions. In most cases, these are direct translations of
+ * the documentation found in the white paper.
+ */
 
 static void mapping_insert(size_t size, int *fli, int *sli)
 {
@@ -534,9 +534,9 @@ static block_header_t *search_suitable_block(control_t *control, int *fli, int *
 	int sl = *sli;
 
 	/*
-	** First, search for a block in the list associated with the given
-	** fl/sl index.
-	*/
+	 * First, search for a block in the list associated with the given
+	 * fl/sl index.
+	 */
 	unsigned int sl_map = control->sl_bitmap[fl] & (~0U << sl);
 	if (!sl_map) {
 		/* No block exists. Search in the next largest first-level list. */
@@ -597,9 +597,9 @@ static void insert_free_block(control_t *control, block_header_t *block, int fl,
 	tlsf_assert(block_to_ptr(block) == align_ptr(block_to_ptr(block), ALIGN_SIZE)
 		&& "block not aligned properly");
 	/*
-	** Insert the new block at the head of the list, and mark the first-
-	** and second-level bitmaps appropriately.
-	*/
+	 * Insert the new block at the head of the list, and mark the first-
+	 * and second-level bitmaps appropriately.
+	 */
 	control->blocks[fl][sl] = block;
 	control->fl_bitmap |= (1U << fl);
 	control->sl_bitmap[fl] |= (1U << sl);
@@ -737,11 +737,11 @@ static block_header_t *block_locate_free(control_t *control, size_t size)
 		mapping_search(size, &fl, &sl);
 
 		/*
-		** mapping_search can futz with the size, so for excessively large sizes it can sometimes wind up
-		** with indices that are off the end of the block array.
-		** So, we protect against that here, since this is the only callsite of mapping_search.
-		** Note that we don't need to check sl, since it comes from a modulo operation that guarantees it's always in range.
-		*/
+		 * mapping_search can futz with the size, so for excessively large sizes it can sometimes wind up
+		 * with indices that are off the end of the block array.
+		 * So, we protect against that here, since this is the only callsite of mapping_search.
+		 * Note that we don't need to check sl, since it comes from a modulo operation that guarantees it's always in range.
+		 */
 		if (fl < FL_INDEX_COUNT) {
 			block = search_suitable_block(control, &fl, &sl);
 		}
@@ -785,8 +785,8 @@ static void control_construct(control_t *control)
 }
 
 /*
-** Debugging utilities.
-*/
+ * Debugging utilities.
+ */
 
 typedef struct integrity_t {
 	int prev_status;
@@ -820,10 +820,8 @@ int tlsf_check(tlsf_t tlsf)
 	int status = 0;
 
 	/* Check that the free lists and bitmaps are accurate. */
-	for (i = 0; i < FL_INDEX_COUNT; ++i)
-	{
-		for (j = 0; j < SL_INDEX_COUNT; ++j)
-		{
+	for (i = 0; i < FL_INDEX_COUNT; ++i) {
+		for (j = 0; j < SL_INDEX_COUNT; ++j) {
 			const int fl_map = control->fl_bitmap & (1 << i);
 			const int sl_list = control->sl_bitmap[i];
 			const int sl_map = sl_list & (1 << j);
@@ -907,9 +905,9 @@ int tlsf_check_pool(pool_t pool)
 }
 
 /*
-** Size of the TLSF structures in a given memory block passed to
-** tlsf_create, equal to the size of a control_t
-*/
+ * Size of the TLSF structures in a given memory block passed to
+ * tlsf_create, equal to the size of a control_t
+ */
 size_t tlsf_size(void)
 {
 	return sizeof(control_t);
@@ -931,10 +929,10 @@ size_t tlsf_block_size_max(void)
 }
 
 /*
-** Overhead of the TLSF structures in a given memory block passed to
-** tlsf_add_pool, equal to the overhead of a free block and the
-** sentinel block.
-*/
+ * Overhead of the TLSF structures in a given memory block passed to
+ * tlsf_add_pool, equal to the overhead of a free block and the
+ * sentinel block.
+ */
 size_t tlsf_pool_overhead(void)
 {
 	return 2 * block_header_overhead;
@@ -973,10 +971,10 @@ pool_t tlsf_add_pool(tlsf_t tlsf, void *mem, size_t bytes)
 	}
 
 	/*
-	** Create the main free block. Offset the start of the block slightly
-	** so that the prev_phys_block field falls outside of the pool -
-	** it will never be used.
-	*/
+	 * Create the main free block. Offset the start of the block slightly
+	 * so that the prev_phys_block field falls outside of the pool -
+	 * it will never be used.
+	 */
 	block = offset_to_block(mem, -(tlsfptr_t)block_header_overhead);
 	block_set_size(block, pool_bytes);
 	block_set_free(block);
@@ -1008,8 +1006,8 @@ void tlsf_remove_pool(tlsf_t tlsf, pool_t pool)
 }
 
 /*
-** TLSF main interface.
-*/
+ * TLSF main interface.
+ */
 
 #if _DEBUG
 int test_ffs_fls()
@@ -1089,20 +1087,20 @@ void *tlsf_memalign(tlsf_t tlsf, size_t align, size_t size)
 	const size_t adjust = adjust_request_size(size, ALIGN_SIZE);
 
 	/*
-	** We must allocate an additional minimum block size bytes so that if
-	** our free block will leave an alignment gap which is smaller, we can
-	** trim a leading free block and release it back to the pool. We must
-	** do this because the previous physical block is in use, therefore
-	** the prev_phys_block field is not valid, and we can't simply adjust
-	** the size of that block.
-	*/
+	 * We must allocate an additional minimum block size bytes so that if
+	 * our free block will leave an alignment gap which is smaller, we can
+	 * trim a leading free block and release it back to the pool. We must
+	 * do this because the previous physical block is in use, therefore
+	 * the prev_phys_block field is not valid, and we can't simply adjust
+	 * the size of that block.
+	 */
 	const size_t gap_minimum = sizeof(block_header_t);
 	const size_t size_with_gap = adjust_request_size(adjust + align + gap_minimum, align);
 
 	/*
-	** If alignment is less than or equals base alignment, we're done.
-	** If we requested 0 bytes, return null, as tlsf_malloc(0) does.
-	*/
+	 * If alignment is less than or equals base alignment, we're done.
+	 * If we requested 0 bytes, return null, as tlsf_malloc(0) does.
+	 */
 	const size_t aligned_size = (adjust && align > ALIGN_SIZE) ? size_with_gap : adjust;
 
 	block_header_t *block = block_locate_free(control, aligned_size);
@@ -1152,18 +1150,18 @@ void tlsf_free(tlsf_t tlsf, void *ptr)
 }
 
 /*
-** The TLSF block information provides us with enough information to
-** provide a reasonably intelligent implementation of realloc, growing or
-** shrinking the currently allocated block as required.
-**
-** This routine handles the somewhat esoteric edge cases of realloc:
-** - a non-zero size with a null pointer will behave like malloc
-** - a zero size with a non-null pointer will behave like free
-** - a request that cannot be satisfied will leave the original buffer
-**   untouched
-** - an extended buffer size will leave the newly-allocated area with
-**   contents undefined
-*/
+ * The TLSF block information provides us with enough information to
+ * provide a reasonably intelligent implementation of realloc, growing or
+ * shrinking the currently allocated block as required.
+ *
+ * This routine handles the somewhat esoteric edge cases of realloc:
+ * - a non-zero size with a null pointer will behave like malloc
+ * - a zero size with a non-null pointer will behave like free
+ * - a request that cannot be satisfied will leave the original buffer
+ *   untouched
+ * - an extended buffer size will leave the newly-allocated area with
+ *   contents undefined
+ */
 void *tlsf_realloc(tlsf_t tlsf, void* ptr, size_t size)
 {
 	control_t *control = tlsf_cast(control_t *, tlsf);
@@ -1187,9 +1185,9 @@ void *tlsf_realloc(tlsf_t tlsf, void* ptr, size_t size)
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
 
 		/*
-		** If the next block is used, or when combined with the current
-		** block, does not offer enough space, we must reallocate and copy.
-		*/
+		 * If the next block is used, or when combined with the current
+		 * block, does not offer enough space, we must reallocate and copy.
+		 */
 		if (adjust > cursize && (!block_is_free(next) || adjust > combined)) {
 			p = tlsf_malloc(tlsf, size);
 			if (p) {
