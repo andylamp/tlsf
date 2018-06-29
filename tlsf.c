@@ -232,10 +232,10 @@ enum tlsf_private
 
 #if defined (TLSF_64BIT)
 	/*
-	 * TODO: We can increase this to support larger sizes, at the expense
+	 * Increased this (from 32 to 40) to support larger sizes, at the expense
 	 * of more overhead in the TLSF structure.
 	 */
-	FL_INDEX_MAX = 32,
+	FL_INDEX_MAX = 40,
 #else
 	FL_INDEX_MAX = 30,
 #endif
