@@ -28,7 +28,7 @@ It also leverages the TLSF 2.0 improvement to shrink the per-block overhead from
 History
 -------
 
-2017/06/26
+2017/06/26 - v3.1.2
   * added an example ([example](./example.c))
   * moved build toolchain to `autotools`
   * added a build script ([`build.sh`](./build.sh))
