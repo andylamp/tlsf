@@ -56,7 +56,7 @@ size_t bench_trials = 100000;       // benchmark trials
 clock_t
 tic(char *msg) {
   if(msg != NULL) {
-    printf(" ** Tick: %s\n", msg);
+    printf(" ** Tick (%s)\n", msg);
   }
   return clock();
 }
@@ -232,8 +232,10 @@ tlsf_bench(wtlsf_t *pool, int trials, int *malloc_latency, int *free_latency) {
     // free from tlsf
     tlsf_free(pool->tlsf_ptr, p1);
   }
+  double elapsed = toc(ctx, NULL, false);
   printf(" -- Finished %d trials in pool, elapsed time for bench was %f seconds\n", 
-    trials, toc(ctx, NULL, false));
+    trials, elapsed);
+  printf(" -- xput: %lf [malloc/free] ops/sec\n", trials/elapsed);
 }
 
 /**
