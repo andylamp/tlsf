@@ -46,9 +46,18 @@ typedef struct _alloc_plan_t {
   size_t plan_size;         // the plan size -- should be <= pool_size/2
 } alloc_plan_t;
 
+/* allocation plan type */
+typedef enum _alloc_plan_type_t {
+  ALLOC_SEQ = 0,
+  ALLOC_RAMP = 1,
+  ALLOC_HALF_RAMP_AND_HAMMER = 2,
+  /* maybe more to be added? */
+} alloc_plan_type_t;
+
 /**
  * Globals
  */
+const size_t mb_div = (1024*1024); // divider from Bytes to MB 
 
 // pool config
 size_t min_block_size = 8192;   // default 8kb (2^13) 
@@ -131,6 +140,8 @@ tag_blocks(alloc_plan_t *plan) {
   int cap = plan->plan_size-1;    // N
   int req = plan->plan_size/2;    // M
   int im = 0;
+  size_t total_alloc_size = 0;
+  // first pass, tag allocation blocks
   for (int i = 0; i < cap && im < req; ++i) {
     int rn = cap - i;
     int rm = req - im;
@@ -138,6 +149,7 @@ tag_blocks(alloc_plan_t *plan) {
       im++;
       // generate the block size
       size_t blk_size = block_gen();
+      total_alloc_size += blk_size;
       // tag malloc block
       printf(" -- Tagging malloc block at: %d with size of %zu bytes\n", i, blk_size);
       // actually tag it
@@ -145,7 +157,9 @@ tag_blocks(alloc_plan_t *plan) {
       plan->is_alloc[i] = true;
     }
   }
-  printf(" ** Final tags: %d out of %zu\n", im, plan->plan_size);
+  // second pass arrange the dealloc pattern.
+  printf(" ** Final tags: %d out of %zu, total plan pressure: %zu MB\n", 
+    im, plan->plan_size, total_alloc_size/mb_div);
 }
 
 
@@ -365,8 +379,7 @@ void
 tlsf_bench(wtlsf_t *pool, int trials, alloc_plan_t *plan) {
   printf(" -- Running %d trials with a pool size of %zu bytes\n", trials, pool->size);
   clock_t ctx = tic(NULL);
-  for (int i = 0; i < trials; ++i)
-  {
+  for (int i = 0; i < trials; ++i) {
     // generate a block size
     size_t blk_size = block_gen();
     // allocate from tlsf
