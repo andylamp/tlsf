@@ -1,9 +1,9 @@
-AC_INIT([nio-tlsf], [0.1], [akritid@niometrics.com])
+AC_INIT([nio-tlsf], [0.2], [akritid@niometrics.com])
 
 # Library version information. This is different from the package version
 # defined above. Before updating, please read:
 # http://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html
-TLSF_CURRENT=0
+TLSF_CURRENT=1
 TLSF_REVISION=0
 TLSF_AGE=0
 

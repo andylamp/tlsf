@@ -1,5 +1,5 @@
 Name:          nio-tlsf
-Version:       0.1
+Version:       0.2
 Release:       <CI_CNT>.<B_CNT>%{?dist}
 License:       BSD
 Source:        %{name}-%{version}.tar.gz
