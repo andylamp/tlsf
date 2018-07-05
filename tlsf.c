@@ -38,21 +38,22 @@
 #define TLSF_64BIT
 #endif
 
-#if HAVE___BUILTIN_FFS && HAVE___BUILTIN_CLZ
+#if HAVE___BUILTIN_FFS && HAVE___BUILTIN_CLZL
 static int tlsf_ffs(unsigned int word)
 {
 	return __builtin_ffs(word) - 1;
 }
 
-static int tlsf_fls(unsigned int word)
+static int tlsf_fls_sizet(size_t word)
 {
-	const int bit = word ? 32 - __builtin_clz(word) : 0;
+	const int ulong_bits = 8 * sizeof(unsigned long);
+	const int bit = word ? ulong_bits - __builtin_clzl((unsigned long)word) : 0;
 	return bit - 1;
 }
 #else
 /* Fall back to generic implementation */
 
-static int tlsf_fls_generic(unsigned int word)
+static int tlsf_fls(unsigned int word)
 {
 	int bit = 32;
 
@@ -63,23 +64,15 @@ static int tlsf_fls_generic(unsigned int word)
 	if (!(word & 0xc0000000)) { word <<= 2; bit -= 2; }
 	if (!(word & 0x80000000)) { word <<= 1; bit -= 1; }
 
-	return bit;
+	return bit - 1;
 }
 
 /* Implement ffs in terms of fls */
 static int tlsf_ffs(unsigned int word)
 {
-	return tlsf_fls_generic(word & (~word + 1)) - 1;
+	return tlsf_fls(word & (~word + 1));
 }
 
-static int tlsf_fls(unsigned int word)
-{
-	return tlsf_fls_generic(word) - 1;
-}
-
-#endif
-
-/* Possibly 64-bit version of tlsf_fls */
 #if defined (TLSF_64BIT)
 static int tlsf_fls_sizet(size_t size)
 {
@@ -95,6 +88,8 @@ static int tlsf_fls_sizet(size_t size)
 }
 #else
 #define tlsf_fls_sizet tlsf_fls
+#endif
+
 #endif
 
 /*
@@ -442,7 +437,7 @@ static block_header_t *search_suitable_block(control_t *control, int *fli, int *
 	unsigned int sl_map = control->sl_bitmap[fl] & (~0U << sl);
 	if (!sl_map) {
 		/* No block exists. Search in the next largest first-level list */
-		const unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
+		unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
 		if (!fl_map) {
 			/* No free blocks available, memory has been exhausted */
 			return NULL;
@@ -632,7 +627,8 @@ static block_header_t *block_trim_free_leading(control_t *control, block_header_
 
 static block_header_t *block_locate_free(control_t *control, size_t size)
 {
-	int fl = 0, sl = 0;
+	int fl = 0;
+	int sl = 0;
 	block_header_t *block = 0;
 
 	if (size) {
@@ -678,9 +674,9 @@ static void control_construct(control_t *control)
 	control->block_null.prev_free = &control->block_null;
 
 	control->fl_bitmap = 0;
-	for (i = 0; i < FL_INDEX_COUNT; ++i) {
+	for (i = 0; i < FL_INDEX_COUNT; i++) {
 		control->sl_bitmap[i] = 0;
-		for (j = 0; j < SL_INDEX_COUNT; ++j) {
+		for (j = 0; j < SL_INDEX_COUNT; j++) {
 			control->blocks[i][j] = &control->block_null;
 		}
 	}
@@ -722,8 +718,8 @@ int tlsf_check(tlsf_t *tlsf)
 	int status = 0;
 
 	/* Check that the free lists and bitmaps are accurate */
-	for (i = 0; i < FL_INDEX_COUNT; ++i) {
-		for (j = 0; j < SL_INDEX_COUNT; ++j) {
+	for (i = 0; i < FL_INDEX_COUNT; i++) {
+		for (j = 0; j < SL_INDEX_COUNT; j++) {
 			const int fl_map = control->fl_bitmap & (1 << i);
 			const int sl_list = control->sl_bitmap[i];
 			const int sl_map = sl_list & (1 << j);
@@ -895,7 +891,8 @@ void tlsf_remove_pool(tlsf_t *tlsf, pool_t *pool)
 	control_t *control = tlsf_cast(control_t *, tlsf);
 	block_header_t *block = offset_to_block(pool, -(int)block_header_overhead);
 
-	int fl = 0, sl = 0;
+	int fl = 0;
+	int sl = 0;
 
 	tlsf_assert(block_is_free(block) && "block should be free");
 	tlsf_assert(!block_is_free(block_next(block)) && "next block should not be free");
