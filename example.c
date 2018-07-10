@@ -9,7 +9,7 @@ main(int argc, char **argv)
 	size_t memory_size = 1024*1024;
 	char *memory = malloc(memory_size);
 
-	tlsf_t tlsf = tlsf_create_with_pool(memory, memory_size);
+	tlsf_t *tlsf = tlsf_create_with_pool(memory, memory_size);
 
 	void *p1 = tlsf_malloc(tlsf, 100);
 	void *p2 = tlsf_malloc(tlsf, 1000);
