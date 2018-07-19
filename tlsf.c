@@ -633,7 +633,7 @@ static block_header_t *block_locate_free(control_t *control, size_t size)
 {
 	int fl = 0;
 	int sl = 0;
-	block_header_t *block = 0;
+	block_header_t *block = NULL;
 
 	if (size) {
 		mapping_search(size, &fl, &sl);
@@ -659,7 +659,7 @@ static block_header_t *block_locate_free(control_t *control, size_t size)
 
 static void *block_prepare_used(control_t *control, block_header_t *block, size_t size)
 {
-	void *p = 0;
+	void *p = NULL;
 	if (block) {
 		tlsf_assert(size && "size must be non-zero");
 		block_trim_free(control, block, size);
@@ -1065,7 +1065,7 @@ void tlsf_free(tlsf_t *tlsf, void *ptr)
 void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 {
 	control_t *control = tlsf_cast(control_t *, tlsf);
-	void *p = 0;
+	void *p = NULL;
 
 	/* Zero-size requests are treated as free */
 	if (ptr && size == 0) {
