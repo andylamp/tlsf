@@ -13,6 +13,7 @@
  * of the document, therefore no GPL restrictions apply.
  *
  * Copyright (c) 2006-2016, Matthew Conte
+ * Copyright (c) 2018, Niometrics
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
