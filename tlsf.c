@@ -386,7 +386,7 @@ static void *align_ptr(const void *ptr, size_t align)
 static size_t adjust_request_size(size_t size, size_t align)
 {
 	size_t adjust = 0;
-	if (size) {
+	if (size > 0) {
 		const size_t aligned = align_up(size, align);
 
 		/* aligned sized must not exceed block_size_max or we'll go out of bounds on sl_bitmap */
@@ -438,10 +438,10 @@ static block_header_t *search_suitable_block(control_t *control, int *fli, int *
 	 * fl/sl index.
 	 */
 	unsigned int sl_map = control->sl_bitmap[fl] & (~0U << sl);
-	if (!sl_map) {
+	if (sl_map == 0) {
 		/* No block exists. Search in the next largest first-level list */
 		unsigned int fl_map = control->fl_bitmap & (~0U << (fl + 1));
-		if (!fl_map) {
+		if (fl_map == 0) {
 			/* No free blocks available, memory has been exhausted */
 			return NULL;
 		}
@@ -477,7 +477,7 @@ static void remove_free_block(control_t *control, block_header_t *block, int fl,
 			control->sl_bitmap[fl] &= ~(1U << sl);
 
 			/* If the second bitmap is now empty, clear the fl bitmap */
-			if (!control->sl_bitmap[fl]) {
+			if (control->sl_bitmap[fl] == 0) {
 				control->fl_bitmap &= ~(1U << fl);
 			}
 		}
@@ -635,7 +635,7 @@ static block_header_t *block_locate_free(control_t *control, size_t size)
 	int sl = 0;
 	block_header_t *block = NULL;
 
-	if (size) {
+	if (size > 0) {
 		mapping_search(size, &fl, &sl);
 
 		/*
@@ -649,7 +649,7 @@ static block_header_t *block_locate_free(control_t *control, size_t size)
 		}
 	}
 
-	if (block) {
+	if (block != NULL) {
 		tlsf_assert(block_size(block) >= size);
 		remove_free_block(control, block, fl, sl);
 	}
@@ -660,7 +660,7 @@ static block_header_t *block_locate_free(control_t *control, size_t size)
 static void *block_prepare_used(control_t *control, block_header_t *block, size_t size)
 {
 	void *p = NULL;
-	if (block) {
+	if (block != NULL) {
 		tlsf_assert(size && "size must be non-zero");
 		block_trim_free(control, block, size);
 		block_mark_as_used(block);
@@ -730,11 +730,11 @@ int tlsf_check(tlsf_t *tlsf)
 			const block_header_t *block = control->blocks[i][j];
 
 			/* Check that first- and second-level lists agree */
-			if (!fl_map) {
+			if (fl_map == 0) {
 				tlsf_insist(!sl_map && "second-level map must be null");
 			}
 
-			if (!sl_map) {
+			if (sl_map == 0) {
 				tlsf_insist(block == &control->block_null && "block list must be null");
 				continue;
 			}
@@ -787,7 +787,7 @@ void tlsf_walk_pool(pool_t *pool, tlsf_walker walker, void *user)
 size_t tlsf_block_size(void *ptr)
 {
 	size_t size = 0;
-	if (ptr) {
+	if (ptr != NULL) {
 		const block_header_t *block = block_from_ptr(ptr);
 		size = block_size(block);
 	}
@@ -1008,14 +1008,14 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 	/* This can't be a static assert */
 	tlsf_assert(sizeof(block_header_t) == block_size_min + block_header_overhead);
 
-	if (block) {
+	if (block != NULL) {
 		void *ptr = block_to_ptr(block);
 		void *aligned = align_ptr(ptr, align);
 		size_t gap = tlsf_cast(size_t,
 			tlsf_cast(ptrdiff_t, aligned) - tlsf_cast(ptrdiff_t, ptr));
 
 		/* If gap size is too small, offset to next aligned boundary */
-		if (gap && gap < gap_minimum) {
+		if (gap > 0 && gap < gap_minimum) {
 			const size_t gap_remain = gap_minimum - gap;
 			const size_t offset = tlsf_max(gap_remain, align);
 			const void *next_aligned = tlsf_cast(void *,
@@ -1026,7 +1026,7 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 				tlsf_cast(ptrdiff_t, aligned) - tlsf_cast(ptrdiff_t, ptr));
 		}
 
-		if (gap) {
+		if (gap > 0) {
 			tlsf_assert(gap >= gap_minimum && "gap size too small");
 			block = block_trim_free_leading(control, block, gap);
 		}
@@ -1038,7 +1038,7 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 void tlsf_free(tlsf_t *tlsf, void *ptr)
 {
 	/* Don't attempt to free a NULL pointer */
-	if (ptr) {
+	if (ptr != NULL) {
 		control_t *control = tlsf_cast(control_t *, tlsf);
 		block_header_t *block = block_from_ptr(ptr);
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
@@ -1068,11 +1068,11 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 	void *p = NULL;
 
 	/* Zero-size requests are treated as free */
-	if (ptr && size == 0) {
+	if (ptr != NULL && size == 0) {
 		tlsf_free(tlsf, ptr);
 	}
 	/* Requests with NULL pointers are treated as malloc */
-	else if (!ptr) {
+	else if (ptr == NULL) {
 		p = tlsf_malloc(tlsf, size);
 	} else {
 		block_header_t *block = block_from_ptr(ptr);
@@ -1090,7 +1090,7 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 		 */
 		if (adjust > cursize && (!block_is_free(next) || adjust > combined)) {
 			p = tlsf_malloc(tlsf, size);
-			if (p) {
+			if (p != NULL) {
 				const size_t minsize = tlsf_min(cursize, size);
 				memcpy(p, ptr, minsize);
 				tlsf_free(tlsf, ptr);
