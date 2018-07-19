@@ -246,9 +246,6 @@ typedef struct control {
 	block_header_t *blocks[FL_INDEX_COUNT][SL_INDEX_COUNT];
 } control_t;
 
-/* A type used for casting when doing pointer arithmetic */
-typedef ptrdiff_t tlsfptr_t;
-
 /*
  * block_header_t member functions.
  */
@@ -314,7 +311,7 @@ static void *block_to_ptr(const block_header_t *block)
 /* Return location of next block after block of given size */
 static block_header_t *offset_to_block(const void *ptr, size_t size)
 {
-	return tlsf_cast(block_header_t *, tlsf_cast(tlsfptr_t, ptr) + size);
+	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) + size);
 }
 
 /* Return location of previous block */
@@ -370,8 +367,8 @@ static size_t align_down(size_t x, size_t align)
 
 static void *align_ptr(const void *ptr, size_t align)
 {
-	const tlsfptr_t aligned =
-		(tlsf_cast(tlsfptr_t, ptr) + (align - 1)) & ~(align - 1);
+	const ptrdiff_t aligned =
+		(tlsf_cast(ptrdiff_t, ptr) + (align - 1)) & ~(align - 1);
 	tlsf_assert(0 == (align & (align - 1)) && "must align to a power of two");
 	return tlsf_cast(void *, aligned);
 }
@@ -871,7 +868,7 @@ pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 	 * so that the prev_phys_block field falls outside of the pool -
 	 * it will never be used.
 	 */
-	block = offset_to_block(mem, -(tlsfptr_t)block_header_overhead);
+	block = offset_to_block(mem, -(ptrdiff_t)block_header_overhead);
 	block_set_size(block, pool_bytes);
 	block_set_free(block);
 	block_set_prev_used(block);
@@ -941,7 +938,7 @@ tlsf_t *tlsf_create(void *mem)
 	}
 #endif
 
-	if (((tlsfptr_t)mem % ALIGN_SIZE) != 0) {
+	if (((ptrdiff_t)mem % ALIGN_SIZE) != 0) {
 		printf("tlsf_create: Memory must be aligned to %u bytes.\n",
 			(unsigned int)ALIGN_SIZE);
 		return NULL;
@@ -1009,18 +1006,18 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 		void *ptr = block_to_ptr(block);
 		void *aligned = align_ptr(ptr, align);
 		size_t gap = tlsf_cast(size_t,
-			tlsf_cast(tlsfptr_t, aligned) - tlsf_cast(tlsfptr_t, ptr));
+			tlsf_cast(ptrdiff_t, aligned) - tlsf_cast(ptrdiff_t, ptr));
 
 		/* If gap size is too small, offset to next aligned boundary */
 		if (gap && gap < gap_minimum) {
 			const size_t gap_remain = gap_minimum - gap;
 			const size_t offset = tlsf_max(gap_remain, align);
 			const void *next_aligned = tlsf_cast(void *,
-				tlsf_cast(tlsfptr_t, aligned) + offset);
+				tlsf_cast(ptrdiff_t, aligned) + offset);
 
 			aligned = align_ptr(next_aligned, align);
 			gap = tlsf_cast(size_t,
-				tlsf_cast(tlsfptr_t, aligned) - tlsf_cast(tlsfptr_t, ptr));
+				tlsf_cast(ptrdiff_t, aligned) - tlsf_cast(ptrdiff_t, ptr));
 		}
 
 		if (gap) {
