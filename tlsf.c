@@ -196,8 +196,12 @@ typedef struct block_header {
 	/* Points to the previous physical block */
 	struct block_header *prev_phys_block;
 
-	/* The size of this block, excluding the block header */
-	size_t size;
+	struct metadata {
+		/* The size of this block, excluding the block header.
+ 		 * The last two bits are used for flags.
+ 		 */
+		size_t size;
+	} metadata;
 
 	/* Next and previous free blocks */
 	struct block_header *next_free;
@@ -217,7 +221,7 @@ static const size_t block_header_prev_free_bit = 1 << 1;
  * The size of the block header exposed to used blocks is the size field.
  * The prev_phys_block field is stored *inside* the previous free block.
  */
-static const size_t block_header_overhead = sizeof(size_t);
+static const size_t block_metadata_overhead = sizeof(struct metadata);
 
 /*
  * The size of the block header that overlaps the previous block,
@@ -226,16 +230,16 @@ static const size_t block_header_overhead = sizeof(size_t);
 static const size_t block_header_overlap = sizeof(block_header_t *);
 
 
-/* User data starts directly after the size field in a used block */
+/* User data starts directly after the metadata record in a used block */
 static const size_t block_start_offset =
-	offsetof(block_header_t, size) + sizeof(size_t);
+	offsetof(block_header_t, metadata) + sizeof(struct metadata);
 
 /*
  * A free block must be large enough to store its header minus the size of
  * the metadata, and no larger than the number of addressable
  * bits for FL_INDEX.
  */
-static const size_t block_size_min = sizeof(block_header_t) - sizeof(size_t); // FIXME metadata
+static const size_t block_size_min = sizeof(block_header_t) - sizeof(struct metadata);
 static const size_t block_size_max = tlsf_cast(size_t, 1) << FL_INDEX_MAX;
 
 
@@ -258,13 +262,13 @@ struct tlsf {
 
 static size_t block_size(const block_header_t *block)
 {
-	return block->size & ~(block_header_free_bit | block_header_prev_free_bit);
+	return block->metadata.size & ~(block_header_free_bit | block_header_prev_free_bit);
 }
 
 static void block_set_size(block_header_t *block, size_t size)
 {
-	const size_t oldsize = block->size;
-	block->size = size | (oldsize & (block_header_free_bit | block_header_prev_free_bit));
+	const size_t oldsize = block->metadata.size;
+	block->metadata.size = size | (oldsize & (block_header_free_bit | block_header_prev_free_bit));
 }
 
 static int block_is_last(const block_header_t *block)
@@ -274,32 +278,32 @@ static int block_is_last(const block_header_t *block)
 
 static int block_is_free(const block_header_t *block)
 {
-	return tlsf_cast(int, block->size & block_header_free_bit);
+	return tlsf_cast(int, block->metadata.size & block_header_free_bit);
 }
 
 static void block_set_free(block_header_t *block)
 {
-	block->size |= block_header_free_bit;
+	block->metadata.size |= block_header_free_bit;
 }
 
 static void block_set_used(block_header_t *block)
 {
-	block->size &= ~block_header_free_bit;
+	block->metadata.size &= ~block_header_free_bit;
 }
 
 static int block_is_prev_free(const block_header_t *block)
 {
-	return tlsf_cast(int, block->size & block_header_prev_free_bit);
+	return tlsf_cast(int, block->metadata.size & block_header_prev_free_bit);
 }
 
 static void block_set_prev_free(block_header_t *block)
 {
-	block->size |= block_header_prev_free_bit;
+	block->metadata.size |= block_header_prev_free_bit;
 }
 
 static void block_set_prev_used(block_header_t *block)
 {
-	block->size &= ~block_header_prev_free_bit;
+	block->metadata.size &= ~block_header_prev_free_bit;
 }
 
 static block_header_t *block_from_ptr(const void *ptr)
@@ -533,12 +537,12 @@ static block_header_t *block_split(block_header_t *block, size_t size)
 	block_header_t *remaining =
 		offset_to_block(block_to_ptr(block), size);
 
-	const size_t remain_size = block_size(block) - (size + block_header_overhead);
+	const size_t remain_size = block_size(block) - (size + block_metadata_overhead);
 
 	tlsf_assert(block_to_ptr(remaining) == align_ptr(block_to_ptr(remaining), ALIGN_SIZE)
 		&& "remaining block not aligned properly");
 
-	tlsf_assert(block_size(block) == remain_size + size + block_header_overhead);
+	tlsf_assert(block_size(block) == remain_size + size + block_metadata_overhead);
 	block_set_size(remaining, remain_size);
 	tlsf_assert(block_size(remaining) >= block_size_min && "block split with invalid size");
 
@@ -553,7 +557,7 @@ static block_header_t *block_absorb(block_header_t *prev, block_header_t *block)
 {
 	tlsf_assert(!block_is_last(prev) && "previous block can't be last");
 	/* Note: Leaves flags untouched */
-	prev->size += block_size(block) + block_header_overhead;
+	prev->metadata.size += block_size(block) + block_metadata_overhead;
 	block_link_next(prev);
 	return prev;
 }
@@ -619,7 +623,7 @@ static block_header_t *block_trim_free_leading(tlsf_t *tlsf, block_header_t *blo
 	block_header_t *remaining_block = block;
 	if (block_can_split(block, size)) {
 		/* We want the 2nd block */
-		remaining_block = block_split(block, size - block_header_overhead);
+		remaining_block = block_split(block, size - block_metadata_overhead);
 		block_set_prev_free(remaining_block);
 
 		block_link_next(block);
@@ -832,12 +836,12 @@ size_t tlsf_block_size_max(void)
  */
 size_t tlsf_pool_overhead(void)
 {
-	return 2 * block_header_overhead;
+	return 2 * block_metadata_overhead;
 }
 
 size_t tlsf_alloc_overhead(void)
 {
-	return block_header_overhead;
+	return block_metadata_overhead;
 }
 
 pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
@@ -995,7 +999,7 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 	block_header_t *block = block_locate_free(tlsf, aligned_size);
 
 	/* This can't be a static assert */
-	tlsf_assert(sizeof(block_header_t) == block_size_min + block_header_overhead);
+	tlsf_assert(sizeof(block_header_t) == block_size_min + block_metadata_overhead);
 
 	if (block != NULL) {
 		void *ptr = block_to_ptr(block);
@@ -1066,7 +1070,7 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 		block_header_t *next = block_next(block);
 
 		const size_t cursize = block_size(block);
-		const size_t combined = cursize + block_size(next) + block_header_overhead;
+		const size_t combined = cursize + block_size(next) + block_metadata_overhead;
 		const size_t adjust = adjust_request_size(size, ALIGN_SIZE);
 
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
