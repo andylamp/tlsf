@@ -1,9 +1,9 @@
-AC_INIT([nio-tlsf], [0.1], [akritid@niometrics.com])
+AC_INIT([nio-tlsf], [0.2], [akritid@niometrics.com])
 
 # Library version information. This is different from the package version
 # defined above. Before updating, please read:
 # http://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html
-TLSF_CURRENT=0
+TLSF_CURRENT=1
 TLSF_REVISION=0
 TLSF_AGE=0
 
@@ -17,6 +17,9 @@ AM_SILENT_RULES([yes])
 AC_CONFIG_SRCDIR([tlsf.h])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
+
+AX_GCC_BUILTIN(__builtin_ffs)
+AX_GCC_BUILTIN(__builtin_clzl)
 
 AC_PROG_CC_C99
 LT_INIT
