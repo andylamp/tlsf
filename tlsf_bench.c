@@ -5,6 +5,11 @@
  * will then be hammered by consecutive mallocs/frees of 
  * various block sizes which will be variably sized given
  * a range (def. 8kb-50mb)
+ *
+ * 
+ * @author Andreas Grammenos <axorl@niometrics.com>
+ * @copyright Copyright (c) 2018, Niometrics
+ * All rights reserved.
  */
 
 /**
@@ -20,16 +25,25 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <string.h>
+#include <assert.h>
 
 /* tlsf lib */
 #include "tlsf.h"
 
 /* tlsf wrapper for convenience */
 typedef struct _wtlsf_t  {
-  tlsf_t tlsf_ptr;
+  tlsf_t *tlsf_ptr;
   char *mem;
   size_t size;
 } wtlsf_t;
+
+/* allocation plan type */
+typedef enum _alloc_plan_type_t {
+  ALLOC_SEQ = 0,
+  ALLOC_RAMP = 1,
+  ALLOC_HAMMER = 2,
+  /* maybe more to be added? */
+} alloc_plan_type_t;
 
 /* allocation plan helper */
 typedef struct _alloc_plan_t {
@@ -44,15 +58,9 @@ typedef struct _alloc_plan_t {
   double *timings;          // timings for each op performed in the plan
   // plan size
   size_t plan_size;         // the plan size -- should be <= pool_size/2
+  // allocation plan type
+  alloc_plan_type_t type;   // the plan type
 } alloc_plan_t;
-
-/* allocation plan type */
-typedef enum _alloc_plan_type_t {
-  ALLOC_SEQ = 0,
-  ALLOC_RAMP = 1,
-  ALLOC_HALF_RAMP_AND_HAMMER = 2,
-  /* maybe more to be added? */
-} alloc_plan_type_t;
 
 /**
  * Globals
@@ -68,9 +76,12 @@ size_t min_pool_size = 102400;  // default is 100Mb
 size_t blk_mul_min = 1;             // min multiplier
 size_t blk_mul_max = 6400;          // max multiplier
 
+// allocation configuration
+size_t def_trail = 10;          // default trail size
+
 // bench config (or 100000000)
-size_t min_trials = 1000;     // min benchmark trials
-size_t bench_trials = 10000;   // benchmark trials
+size_t min_trials = 1000;       // min benchmark trials
+size_t bench_trials = 10000000; // benchmark trials
 
 /**
  * Functions
@@ -133,33 +144,77 @@ block_gen() {
 }
 
 /**
+ * This function generates a sequential type of allocation plan.
+ */
+size_t
+tag_seq(alloc_plan_t *plan, size_t trail_size) {
+  if(plan->plan_size % 2 != 0 || 
+    plan->plan_size % trail_size != 0) {
+    printf(" !! Cannot create allocation plan, plan size but be multiple \
+      of trail size and even\n");
+    return 0;
+  } else {
+    printf(" ** Plan size is %zu using a trail size of %zu\n", 
+      plan->plan_size, trail_size);
+  }
+  // loop once and tag allocations
+  size_t blk_size = 0;
+  size_t total_alloc_size = 0;
+  int mem_alloc = 0;
+  for (int i = 0; i < plan->plan_size; i += 2*trail_size) {
+    for(int j = i; j < i+trail_size; j++, mem_alloc++) {
+      blk_size = block_gen();
+      total_alloc_size += blk_size;
+      // tag malloc block
+      //printf(" -- Tagging malloc block at: %d with size of %zu bytes\n", j, blk_size);
+      // now tag allocation blocks
+      plan->block_size[j] = blk_size;
+      plan->is_alloc[j] = true; 
+      // now tag deallocation blocks
+      plan->block_size[j+trail_size] = mem_alloc; // index in mem array instead of size
+      plan->is_alloc[j+trail_size] = false;
+    }
+  }
+  // sanity check
+  assert(mem_alloc == plan->plan_size/2);
+  // return the total allocation size for this plan
+  return total_alloc_size;
+}
+
+/**
  * Tags memory blocks with specific block allocations
  */
 void
 tag_blocks(alloc_plan_t *plan) {
-  int cap = plan->plan_size-1;    // N
-  int req = plan->plan_size/2;    // M
-  int im = 0;
   size_t total_alloc_size = 0;
-  // first pass, tag allocation blocks
-  for (int i = 0; i < cap && im < req; ++i) {
-    int rn = cap - i;
-    int rm = req - im;
-    if(rand() % rn < rm) {
-      im++;
-      // generate the block size
-      size_t blk_size = block_gen();
-      total_alloc_size += blk_size;
-      // tag malloc block
-      printf(" -- Tagging malloc block at: %d with size of %zu bytes\n", i, blk_size);
-      // actually tag it
-      plan->block_size[i] = blk_size;
-      plan->is_alloc[i] = true;
+
+  // check plan types
+  switch(plan->type) {
+    case ALLOC_SEQ: {
+      printf(" ** Tagging blocks with allocation plan: SEQUENTIAL\n");
+      total_alloc_size = tag_seq(plan, def_trail);
+      break;
+    }
+    case ALLOC_RAMP: {
+      printf(" ** Tagging blocks with allocation plan: RAMP\n");
+      break;
+    }
+    case ALLOC_HAMMER: {
+      printf(" ** Tagging blocks with allocation plan: HAMMER\n");
+      break;
+    }
+    default: {
+      printf(" ** Tagging blocks with (default) allocation plan: SEQUENTIAL\n");
+      plan->type = ALLOC_SEQ;
+      total_alloc_size = tag_seq(plan, def_trail);
+      break;
     }
   }
-  // second pass arrange the dealloc pattern.
-  printf(" ** Final tags: %d out of %zu, total plan pressure: %zu MB\n", 
-    im, plan->plan_size, total_alloc_size/mb_div);
+  // total allocation size should not be zero
+  assert(total_alloc_size > 0);
+
+  printf(" ** Final tags: %zu out of %zu, total plan pressure: %zu MB\n", 
+    plan->plan_size/2, plan->plan_size, total_alloc_size/mb_div);
 }
 
 
@@ -215,8 +270,16 @@ generate_alloc_plan(size_t plan_size, alloc_plan_t *plan) {
     free(plan->timings);
     return false;
   }
+  // mem_ptr
+  if((plan->mem_ptr = calloc(plan_size / 2, sizeof(char *))) == NULL) {
+    printf(" !! Failed to allocate pointer array\n");
+    free(plan->block_size);
+    free(plan->timings);
+    free(plan->is_alloc);
+    return false;
+  }
 
-  // now tag half the blocks to be allocations
+  // tag the blocks
   tag_blocks(plan);
 
   // finally return true
@@ -236,11 +299,11 @@ destroy_alloc_plan(alloc_plan_t *plan) {
   // now check if we have some addresses
   if(plan->mem_ptr != NULL) {
     printf(" -- Valid memory block pointer array found, freeing\n");
-    for (int i = 0; i < plan->plan_size; ++i) {
-      if(plan->mem_ptr[i] != NULL) {
-        free(plan->mem_ptr[i]);
-      }
-    }
+    //for (int i = 0; i < plan->plan_size/2; ++i) {
+    //  if(plan->mem_ptr[i] != NULL) {
+    //    free(plan->mem_ptr[i]);
+    //  }
+    //}
     free(plan->mem_ptr);
   }
   // check if we have a valid block size type array
@@ -326,13 +389,20 @@ alloc_mem(size_t size) {
 /**
  * This function is responsible for creating the tlsf pool structure 
  */
-tlsf_t
-create_tlsf_pool(wtlsf_t *pool) {
+tlsf_t *
+create_tlsf_pool(wtlsf_t *pool, size_t size) {
   // check for valid input
   if(pool == NULL) {
     printf(" !! No pool provided\n");
-    return pool;
+    return NULL;
   } 
+  // check for valid size
+  if(size < min_pool_size) {
+    printf(" !! Pool must be at least of size %zu and requested: %zu\n", 
+      min_pool_size, size);
+  }
+  // set the size
+  pool->size = size;
   // try to allocate (warm) memory
   if((pool->mem = alloc_mem(pool->size)) == NULL) {
     printf(" !! Failed to allocate and warm-up memory, cannot continue\n");
@@ -371,26 +441,91 @@ destroy_tlsf_pool(wtlsf_t *pool) {
   }
 }
 
+/**
+ * Execute the sequential plan
+ */
+void
+tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
+  printf(" !! Running a sequential plan type of size: %zu\n", plan->plan_size);
+  int mem_pivot = 0;
+  double timed_seg = 0;
+  for (int i = 0; i < plan->plan_size; ++i) {
+    clock_t t = tic(NULL);
+    // check if we have an allocation
+    if(plan->is_alloc[i]) {
+      //printf(" -- Allocating block at %d with size %zu bytes\n", 
+      //  i, plan->block_size[i]);
+      plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      mem_pivot++;
+    } else {
+      int free_blk = (int) plan->block_size[i];
+      //printf(" -- Freeing block at %d\n", free_blk);
+      tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+    }
+    timed_seg = toc(t, NULL, false);
+    // insert the timed segment to array
+    plan->timings[i] = timed_seg;
+  }
+  assert(mem_pivot == plan->plan_size/2);
+}
+
+/**
+ * Execute the ramp plan
+ */
+void
+tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
+  //TODO
+}
+
+/**
+ * Execute the hammer plan
+ */
+void 
+tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
+  //TODO
+}
 
 /**
  * This function benchmarks tlsf in sequential malloc/frees
  */
 void
-tlsf_bench(wtlsf_t *pool, int trials, alloc_plan_t *plan) {
-  printf(" -- Running %d trials with a pool size of %zu bytes\n", trials, pool->size);
-  clock_t ctx = tic(NULL);
-  for (int i = 0; i < trials; ++i) {
-    // generate a block size
-    size_t blk_size = block_gen();
-    // allocate from tlsf
-    void *p1 = tlsf_malloc(pool->tlsf_ptr, blk_size);
-    // free from tlsf
-    tlsf_free(pool->tlsf_ptr, p1);
+tlsf_bench(wtlsf_t *pool, alloc_plan_t *plan) {
+  // check if pool is null
+  if(pool == NULL) {
+    printf(" !! Error pool cannot be NULL, cannot continue\n");
   }
+  // check if plan is null
+  if(plan == NULL) {
+    printf(" !! Error allocation plan cannot be NULL, cannot continue\n");
+  }
+  // basic info
+  printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
+    plan->plan_size, pool->size);
+  clock_t ctx = tic(NULL);
+  // execute the sequential plan
+  switch(plan->type) {
+    case ALLOC_SEQ: {
+      tlsf_bench_seq(pool, plan);
+      break;
+    }
+    case ALLOC_RAMP: {
+      tlsf_bench_ramp(pool, plan);
+      break;
+    }
+    case ALLOC_HAMMER: {
+      tlsf_bench_hammer(pool, plan);
+      break;
+    }
+    default: {
+      tlsf_bench_seq(pool, plan);
+      break;
+    }
+  }
+  // find the total elapsed time
   double elapsed = toc(ctx, NULL, false);
-  printf(" -- Finished %d trials in pool, elapsed time for bench was %f seconds\n", 
-    trials, elapsed);
-  printf(" -- xput: %lf [malloc/free] ops/sec\n", trials/elapsed);
+  printf(" -- Finished %zu ops in pool, elapsed time for bench was %f seconds\n", 
+    plan->plan_size, elapsed);
+  printf(" -- xput: %lf [malloc/free] ops/sec\n", plan->plan_size/elapsed);
 }
 
 /**
@@ -405,28 +540,28 @@ main(int argc, char **argv) {
   parse_args(argc, argv);
 
   // generate our pool
-  wtlsf_t pool;
-  pool.size = pool_size;
-
+  wtlsf_t pool = {0};
   // generate the plan
   alloc_plan_t plan = {0};
-  generate_alloc_plan(10000, &plan);
-  destroy_alloc_plan(&plan);
+  generate_alloc_plan(20000, &plan); 
 
-
-  /*
+  // now run the experiment
   char *tag = "Global Pool";
   clock_t c_ctx = tic(tag);
 
   // create the pool
-  create_tlsf_pool(&pool);
+  create_tlsf_pool(&pool, pool_size);
   // now run the bench
-  tlsf_bench(&pool, bench_trials, NULL);
+  tlsf_bench(&pool, &plan);
   // destroy the pool
   destroy_tlsf_pool(&pool);
   
   toc(c_ctx, tag, true);
-  */
+
+  // finally destroy the allocation plan
+  destroy_alloc_plan(&plan);
+ 
+  
   printf("\n");
   return 0;
 }

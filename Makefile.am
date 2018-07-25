@@ -5,7 +5,7 @@ EXTRA_DIST = nio-tlsf.pc nio-tlsf.spec
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = nio-tlsf.pc
 
-AM_CFLAGS = -Wall -std=c11 -g -fsanitize=address -O3
+AM_CFLAGS = -Wall -std=gnu11 -g -fsanitize=address -O3
 
 lib_LTLIBRARIES = libnio-tlsf.la
 
