@@ -193,8 +193,11 @@ tlsf_static_assert(ALIGN_SIZE == SMALL_BLOCK_SIZE / SL_INDEX_COUNT);
  * - The next_free / prev_free fields are only valid if the block is free.
  */
 typedef struct block_header {
-	/* Points to the previous physical block */
-	struct block_header *prev_phys_block;
+	/* Trailer of previous block */
+	struct trailer {
+		/* Points to the previous physical block */
+		struct block_header *prev_phys_block;
+	} prev_trailer;
 
 	struct metadata {
 		/* The size of this block, excluding the block header.
@@ -221,13 +224,13 @@ static const size_t block_header_prev_free_bit = 1 << 1;
  * The size of the block header exposed to used blocks is the size field.
  * The prev_phys_block field is stored *inside* the previous free block.
  */
-static const size_t block_metadata_overhead = sizeof(struct metadata);
+static const size_t metadata_size = sizeof(struct metadata);
 
 /*
  * The size of the block header that overlaps the previous block,
  * namely the size of prev_phys_block field.
  */
-static const size_t block_header_overlap = sizeof(block_header_t *);
+static const size_t trailer_size = sizeof(struct trailer);
 
 
 /* User data starts directly after the metadata record in a used block */
@@ -321,14 +324,14 @@ static void *block_to_ptr(const block_header_t *block)
 /* Return location of next block after block of given size */
 static block_header_t *offset_to_block(const void *ptr, size_t size)
 {
-	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) + size - block_header_overlap);
+	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) + size - trailer_size);
 }
 
 /* Return location of previous block */
 static block_header_t *block_prev(const block_header_t *block)
 {
 	tlsf_assert(block_is_prev_free(block) && "previous block must be free");
-	return block->prev_phys_block;
+	return block->prev_trailer.prev_phys_block;
 }
 
 /* Return location of next existing block */
@@ -344,7 +347,7 @@ static block_header_t *block_next(const block_header_t *block)
 static block_header_t *block_link_next(block_header_t *block)
 {
 	block_header_t *next = block_next(block);
-	next->prev_phys_block = block;
+	next->prev_trailer.prev_phys_block = block;
 	return next;
 }
 
@@ -537,12 +540,12 @@ static block_header_t *block_split(block_header_t *block, size_t size)
 	block_header_t *remaining =
 		offset_to_block(block_to_ptr(block), size);
 
-	const size_t remain_size = block_size(block) - (size + block_metadata_overhead);
+	const size_t remain_size = block_size(block) - (size + metadata_size);
 
 	tlsf_assert(block_to_ptr(remaining) == align_ptr(block_to_ptr(remaining), ALIGN_SIZE)
 		&& "remaining block not aligned properly");
 
-	tlsf_assert(block_size(block) == remain_size + size + block_metadata_overhead);
+	tlsf_assert(block_size(block) == remain_size + size + metadata_size);
 	block_set_size(remaining, remain_size);
 	tlsf_assert(block_size(remaining) >= block_size_min && "block split with invalid size");
 
@@ -557,7 +560,7 @@ static block_header_t *block_absorb(block_header_t *prev, block_header_t *block)
 {
 	tlsf_assert(!block_is_last(prev) && "previous block can't be last");
 	/* Note: Leaves flags untouched */
-	prev->metadata.size += block_size(block) + block_metadata_overhead;
+	prev->metadata.size += block_size(block) + metadata_size;
 	block_link_next(prev);
 	return prev;
 }
@@ -623,7 +626,7 @@ static block_header_t *block_trim_free_leading(tlsf_t *tlsf, block_header_t *blo
 	block_header_t *remaining_block = block;
 	if (block_can_split(block, size)) {
 		/* We want the 2nd block */
-		remaining_block = block_split(block, size - block_metadata_overhead);
+		remaining_block = block_split(block, size - metadata_size);
 		block_set_prev_free(remaining_block);
 
 		block_link_next(block);
@@ -836,12 +839,12 @@ size_t tlsf_block_size_max(void)
  */
 size_t tlsf_pool_overhead(void)
 {
-	return 2 * block_metadata_overhead;
+	return 2 * metadata_size;
 }
 
 size_t tlsf_alloc_overhead(void)
 {
-	return block_metadata_overhead;
+	return metadata_size;
 }
 
 pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
@@ -999,7 +1002,7 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 	block_header_t *block = block_locate_free(tlsf, aligned_size);
 
 	/* This can't be a static assert */
-	tlsf_assert(sizeof(block_header_t) == block_size_min + block_metadata_overhead);
+	tlsf_assert(sizeof(block_header_t) == block_size_min + metadata_size);
 
 	if (block != NULL) {
 		void *ptr = block_to_ptr(block);
@@ -1070,7 +1073,7 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 		block_header_t *next = block_next(block);
 
 		const size_t cursize = block_size(block);
-		const size_t combined = cursize + block_size(next) + block_metadata_overhead;
+		const size_t combined = cursize + block_size(next) + metadata_size;
 		const size_t adjust = adjust_request_size(size, ALIGN_SIZE);
 
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
