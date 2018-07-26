@@ -26,6 +26,8 @@
 #include <getopt.h>
 #include <string.h>
 #include <assert.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 /* tlsf lib */
 #include "tlsf.h"
@@ -49,6 +51,7 @@ typedef enum _alloc_plan_type_t {
 typedef struct _alloc_plan_t {
   // essentials
   char **mem_ptr;           // memory block pointers
+  size_t *cur_malloc_size;  // current malloc size
   size_t *block_size;       // memory block actual size
   bool *is_alloc;           // flag to show if it's for malloc or free
   // statistics
@@ -82,6 +85,10 @@ size_t def_trail = 10;          // default trail size
 // bench config (or 100000000)
 size_t min_trials = 1000;       // min benchmark trials
 size_t bench_trials = 10000000; // benchmark trials
+
+// trace dump related
+char *dump_dir = "./traces";  // dump directory
+char *dump_ext = "csv";       // dump extension
 
 /**
  * Functions
@@ -118,7 +125,7 @@ toc(clock_t start, char *msg, bool print) {
 
 /**
  * Function that uniformly generates integer numbers 
- * within [rlow, rhigh]
+ * within (rlow, rhigh]
  */
 int 
 uni_rand(int rlow, int rhigh) {
@@ -160,11 +167,13 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
   // loop once and tag allocations
   size_t blk_size = 0;
   size_t total_alloc_size = 0;
+  size_t cur_alloc_size = 0;
+  size_t peak_alloc = 0;
   int mem_alloc = 0;
   for (int i = 0; i < plan->plan_size; i += 2*trail_size) {
-    for(int j = i; j < i+trail_size; j++, mem_alloc++) {
+    for(int j = i; j < i+trail_size; j++) {
       blk_size = block_gen();
-      total_alloc_size += blk_size;
+      cur_alloc_size += blk_size;
       // tag malloc block
       //printf(" -- Tagging malloc block at: %d with size of %zu bytes\n", j, blk_size);
       // now tag allocation blocks
@@ -173,8 +182,19 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
       // now tag deallocation blocks
       plan->block_size[j+trail_size] = mem_alloc; // index in mem array instead of size
       plan->is_alloc[j+trail_size] = false;
+      mem_alloc++;
     }
+    // add to aggregate
+    total_alloc_size += cur_alloc_size;
+    // check for peak
+    if(peak_alloc < cur_alloc_size) {
+      peak_alloc = cur_alloc_size;
+    }
+    cur_alloc_size = 0;
   }
+  // update plan details
+  plan->aggregated_alloc = total_alloc_size;
+  plan->peak_alloc = peak_alloc;
   // sanity check
   assert(mem_alloc == plan->plan_size/2);
   // return the total allocation size for this plan
@@ -182,7 +202,13 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
 }
 
 /**
- * Tags memory blocks with specific block allocations
+ * Tags memory blocks with specific memory size allocations
+ *
+ * ALLOC_SEQ: Sequential trails of allocs/deallocs
+ *
+ * ALLOC_RAMP: All allocations done first (ramp-phase), then all deallocs are performed
+ *
+ * ALLOC_HAMMER: All allocations are performed in pairs of alloc/dealloc
  */
 void
 tag_blocks(alloc_plan_t *plan) {
@@ -212,9 +238,10 @@ tag_blocks(alloc_plan_t *plan) {
   }
   // total allocation size should not be zero
   assert(total_alloc_size > 0);
-
-  printf(" ** Final tags: %zu out of %zu, total plan pressure: %zu MB\n", 
-    plan->plan_size/2, plan->plan_size, total_alloc_size/mb_div);
+  printf(" ** Final tags: %zu out of %zu; Total plan pressure: %zu MB, \
+peak plan allocation: %zu MB\n", 
+    plan->plan_size/2, plan->plan_size, 
+    total_alloc_size/mb_div, plan->peak_alloc/mb_div);
 }
 
 
@@ -270,12 +297,21 @@ generate_alloc_plan(size_t plan_size, alloc_plan_t *plan) {
     free(plan->timings);
     return false;
   }
+  // cur_malloc_size array
+  if((plan->cur_malloc_size = calloc(plan_size, sizeof(size_t))) == NULL) {
+    printf(" !! Failed to allocate cur malloc size array\n");
+    free(plan->block_size);
+    free(plan->timings);
+    free(plan->is_alloc);
+    return false;
+  }
   // mem_ptr
   if((plan->mem_ptr = calloc(plan_size / 2, sizeof(char *))) == NULL) {
     printf(" !! Failed to allocate pointer array\n");
     free(plan->block_size);
     free(plan->timings);
     free(plan->is_alloc);
+    free(plan->cur_malloc_size);
     return false;
   }
 
@@ -299,12 +335,12 @@ destroy_alloc_plan(alloc_plan_t *plan) {
   // now check if we have some addresses
   if(plan->mem_ptr != NULL) {
     printf(" -- Valid memory block pointer array found, freeing\n");
-    //for (int i = 0; i < plan->plan_size/2; ++i) {
-    //  if(plan->mem_ptr[i] != NULL) {
-    //    free(plan->mem_ptr[i]);
-    //  }
-    //}
     free(plan->mem_ptr);
+  }
+  // check if we have a cur malloc size type array
+  if (plan->cur_malloc_size != NULL) {
+    printf(" -- Valid cur malloc size array found, freeing\n");
+    free(plan->cur_malloc_size);
   }
   // check if we have a valid block size type array
   if(plan->block_size != NULL) {
@@ -456,11 +492,13 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
       //printf(" -- Allocating block at %d with size %zu bytes\n", 
       //  i, plan->block_size[i]);
       plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
       mem_pivot++;
     } else {
       int free_blk = (int) plan->block_size[i];
       //printf(" -- Freeing block at %d\n", free_blk);
       tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      //plan->cur_malloc_size[free_blk] = 0;
     }
     timed_seg = toc(t, NULL, false);
     // insert the timed segment to array
@@ -529,6 +567,214 @@ tlsf_bench(wtlsf_t *pool, alloc_plan_t *plan) {
 }
 
 /**
+ * little hack to get the numbers showing with two digits even when it's < 10 which
+ * is extremely useful to have ISO 8061 compliance when we create the timestamp
+ */
+void
+num_to_str_pad(char *buf, int number) {
+  // rudimentary error check...
+  if(buf == NULL) {
+    return;
+  }
+  if(number < 10) {
+    snprintf(buf, 3, "0%d", number);
+  } else if (number < 99) {
+    snprintf(buf, 3, "%d", number);
+  }
+}
+
+/**
+ * Creates a timestamp with the filename
+ */
+char *
+create_iso8061_ts(char *dir, char *suffix, char* ext) {
+  time_t ctime;       // holds unix time
+  struct tm *mytime;  // holds local time
+  size_t buf_sz = 100;
+  // get current time
+  time(&ctime);
+  // buffers
+  char tm_mon_buf[3] = {0};
+  char tm_mday_buf[3] = {0};
+  char tm_hour_buf[3] = {0};
+  char tm_min_buf[3] = {0};
+  char tm_sec_buf[3] = {0};
+  // get local time
+  mytime = localtime(&ctime);
+  char *buf = calloc(buf_sz, sizeof(char));
+  if(buf == NULL) {
+    printf(" !! Error could not allocate memory to create timestamp\n");
+    return NULL;
+  }
+
+  // perform the conversion
+  num_to_str_pad(tm_mon_buf, mytime->tm_mon);
+  num_to_str_pad(tm_mday_buf, mytime->tm_mday);
+  num_to_str_pad(tm_hour_buf, mytime->tm_hour);
+  num_to_str_pad(tm_min_buf, mytime->tm_min);
+  num_to_str_pad(tm_sec_buf, mytime->tm_sec);  
+
+  // finally format the timestamp to be in ISO 8061
+  snprintf(buf, buf_sz, "%s/%d%s%sT%s%s%sZ_%s.%s", dir,
+    mytime->tm_year+1900, tm_mon_buf, tm_mday_buf,
+    tm_hour_buf, tm_min_buf, tm_sec_buf, suffix, ext);
+  // finally return
+  return buf;
+}
+
+/**
+ * Create the directory
+ */
+bool
+create_dir(char *dir_full_path) {
+  struct stat st = {0};
+  if(stat(dir_full_path, &st) == -1) {
+    printf(" ** Specified dump directory does not exist, creating\n");
+    if(mkdir(dir_full_path, 0700) != 0) {
+      printf(" !! Could not create directory: %s\n", dir_full_path);
+      return false;
+    } else {
+      printf(" ** Directory (%s) created successfully\n", dir_full_path);
+    }
+    printf(" ** Directory (%s) already exists\n", dir_full_path);
+  }
+  return true;
+}
+
+/**
+ * Create the file to store the results
+ */
+FILE *
+create_dump_file(char *fname) {
+  // try to create the directory, if needed
+  if(!create_dir("./traces/")) {
+    return NULL;
+  }
+  // create the timestamp
+  char *ts_fname = create_iso8061_ts(dump_dir, fname, dump_ext);
+  if(ts_fname == NULL) {
+    printf(" !! Error, null timestamp returned\n");
+    return NULL;
+  }
+  // open the file
+  FILE *fp = fopen(ts_fname, "w");
+  // check for errors
+  if(fp == NULL) {
+    printf(" !! Error, could not open the file\n");
+  } else {
+    printf(" ** Trace dump file %s open for writing\n", ts_fname);
+  }
+  // now free up the timestamp resources
+  if(ts_fname != NULL) {
+    free(ts_fname);
+  }
+  // return the file for writing
+  return fp;
+}
+
+/**
+ * Function that notified the user for trace dump file closure.
+ */
+void
+close_dump_file(FILE *fp) {
+  printf(" ** Trace dump file closed successfully\n");
+  // close the file
+  fclose(fp);
+}
+
+/**
+ * Dump results into a plot-friendly format
+ */
+void
+dump_plan(alloc_plan_t *plan, char *fname) {
+  if(plan == NULL) {
+    printf(" !! Error null plan supplied, cannot continue\n");
+  } else {
+    printf(" ** Dumping allocation plan details with size %zu\n", plan->plan_size);
+  }
+  FILE *fp = create_dump_file(fname);
+  // sanity check
+  if(fp == NULL) {
+    printf(" !! Error, null file pointer, cannot continue dump\n");
+    return;
+  }
+
+  fprintf(fp, "op_type,chunk_size,exec_time,block\n");
+  // loop and dump
+  size_t chunk_size = 0;
+  size_t free_chunk_size = 0;
+  size_t blk_cnt = 0;
+  double exec_time = 0;
+  for (int i = 0; i < plan->plan_size; ++i) {
+    char *op_type = plan->is_alloc[i] == true ? "malloc" : "free";
+    chunk_size = plan->block_size[i];
+    exec_time = plan->timings[i];
+    // differentiate allocation based on alloc/dealloc op
+    if(plan->is_alloc[i] == false) {
+      free_chunk_size = plan->cur_malloc_size[chunk_size];
+      fprintf(fp, "%s,%zu,%lf,%zu\n", op_type, free_chunk_size, exec_time, chunk_size);
+    } else {
+      fprintf(fp, "%s,%zu,%lf,%zu\n", op_type, chunk_size, exec_time, blk_cnt);
+      blk_cnt++;
+    }
+  }
+  // close the file
+  close_dump_file(fp);
+}
+
+/** 
+ * Load allocation plan from trace file
+ */
+alloc_plan_t *
+import_plan(char *fname, alloc_plan_t *plan) {
+  if(fname == NULL) {
+    printf(" !! Error, cannot have null filename, cannot continue\n");
+    return NULL;
+  }
+
+  if(plan == NULL) {
+    printf(" !! Error, cannot have a null allocation plan, cannot continue\n");
+    return NULL;
+  }
+
+  // open the file
+  FILE *fp = fopen(fname, "r");
+  if(fp == NULL) {
+    printf(" !! Error, failed to open the file at: %s for reading\n", fname);
+    return NULL;
+  }
+  // todo
+  return NULL;
+}
+
+/**
+ * Print allocation plan details (mostly for debug reasons)
+ */
+void
+print_plan(alloc_plan_t *plan) {  
+  size_t chunk_size = 0;
+  size_t free_chunk_size = 0;
+  size_t blk_cnt = 0;
+  double exec_time = 0;
+  printf(" ** Printing allocation plan details (size %zu)\n", plan->plan_size);
+  for (int i = 0; i < plan->plan_size; ++i) {
+    char *op_type = plan->is_alloc[i] == true ? "malloc" : "free";
+    chunk_size = plan->block_size[i];
+    exec_time = plan->timings[i];
+    //printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, idx, i);
+    // differentiate allocation based on alloc/dealloc op
+    if(plan->is_alloc[i] == false) {
+      free_chunk_size = plan->cur_malloc_size[chunk_size];
+      printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, free_chunk_size, exec_time, chunk_size, i);
+    } else {
+      printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, blk_cnt, i);
+      blk_cnt++;
+    }
+  }
+  printf(" ** End of allocation plan details print\n");
+}
+
+/**
  * Main stub
  */
 int
@@ -539,11 +785,16 @@ main(int argc, char **argv) {
   // parse arguments
   parse_args(argc, argv);
 
-  // generate our pool
+  // our pool structure
   wtlsf_t pool = {0};
-  // generate the plan
+  // our plan structure
   alloc_plan_t plan = {0};
-  generate_alloc_plan(20000, &plan); 
+  // check for successful allocation plan generation
+  if(!generate_alloc_plan(bench_trials, &plan)) {
+    return 0;
+  } 
+
+  //print_plan(&plan);
 
   // now run the experiment
   char *tag = "Global Pool";
@@ -557,6 +808,11 @@ main(int argc, char **argv) {
   destroy_tlsf_pool(&pool);
   
   toc(c_ctx, tag, true);
+
+  //print_plan(&plan);
+
+  // dump the plan
+  //dump_plan(&plan, "mem_trace");
 
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
