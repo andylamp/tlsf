@@ -36,6 +36,7 @@ config.status
 build-aux/
 *.cache/
 m4/
+traces/
 
 # outputs
 *.lo

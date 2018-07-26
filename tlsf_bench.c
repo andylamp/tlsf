@@ -90,6 +90,10 @@ size_t bench_trials = 10000000; // benchmark trials
 char *dump_dir = "./traces";  // dump directory
 char *dump_ext = "csv";       // dump extension
 
+// tokenizer related
+char *tok_delim_cm = ",";
+char *tok_delim_nl = "\n";
+
 /**
  * Functions
  */
@@ -244,41 +248,12 @@ peak plan allocation: %zu MB\n",
     total_alloc_size/mb_div, plan->peak_alloc/mb_div);
 }
 
-
 /**
- * This function generates an allocation plan based on
- * current trial size; we also make sure that the allocation
- * plan *does not* exceed maximum pool size at any given point.
- *
- * If no plan can be generated the user is informed and false is
- * returned to indicate failure
- *
- * NOTE: There have to be as many allocs as deallocs
+ * Combined preallocation for allocation plan
  */
 bool
-generate_alloc_plan(size_t plan_size, alloc_plan_t *plan) {
-  // basic error checks
-  if(plan_size < min_trials) {
-    printf(" !! Not enough trials, cannot continue (given: %zu, min req: %zu)\n", 
-      plan_size, min_trials);
-    return false;
-  } else if(plan_size < 2) {
-    printf(" !! Cannot have a plan size < 2 provided was: %zu\n", plan_size);
-    return false;
-  } else if(plan_size % 2 != 0) {
-    printf(" !! Cannot have an odd plan size, given %zu \n", plan_size);
-    return false;
-  } else if(plan == NULL) {
-    printf(" !! Null plan struct provided, cannot continue\n");
-    return false;
-  }
-  // erase the structure
-  memset(plan, 0, sizeof(*plan));
-  // set the plan size
-  plan->plan_size = plan_size;
-
-  // first of all, allocate required vars
-  
+perform_plan_prealloc(alloc_plan_t *plan) {
+  size_t plan_size = plan->plan_size;
   // block size array
   if((plan->block_size = calloc(plan_size, sizeof(size_t))) == NULL) {
     printf(" !! Failed to allocate block size\n");
@@ -312,6 +287,46 @@ generate_alloc_plan(size_t plan_size, alloc_plan_t *plan) {
     free(plan->timings);
     free(plan->is_alloc);
     free(plan->cur_malloc_size);
+    return false;
+  }
+  return true;
+}
+
+
+/**
+ * This function generates an allocation plan based on
+ * current trial size; we also make sure that the allocation
+ * plan *does not* exceed maximum pool size at any given point.
+ *
+ * If no plan can be generated the user is informed and false is
+ * returned to indicate failure
+ *
+ * NOTE: There have to be as many allocs as deallocs
+ */
+bool
+gen_alloc_plan(size_t plan_size, alloc_plan_t *plan) {
+  // basic error checks
+  if(plan_size < min_trials) {
+    printf(" !! Not enough trials, cannot continue (given: %zu, min req: %zu)\n", 
+      plan_size, min_trials);
+    return false;
+  } else if(plan_size < 2) {
+    printf(" !! Cannot have a plan size < 2 provided was: %zu\n", plan_size);
+    return false;
+  } else if(plan_size % 2 != 0) {
+    printf(" !! Cannot have an odd plan size, given %zu \n", plan_size);
+    return false;
+  } else if(plan == NULL) {
+    printf(" !! Null plan struct provided, cannot continue\n");
+    return false;
+  }
+  // erase the structure
+  memset(plan, 0, sizeof(*plan));
+  // set the plan size
+  plan->plan_size = plan_size;
+
+  // first of all, preallocate required vars
+  if(!perform_plan_prealloc(plan)) {
     return false;
   }
 
@@ -723,27 +738,87 @@ dump_plan(alloc_plan_t *plan, char *fname) {
 }
 
 /** 
+ * function to check header
+ */
+bool
+check_trace_header(char *header) {
+  char *tok = NULL;
+  // op_type token
+  tok = strtok(header, tok_delim_cm);
+  if(tok == NULL || strcmp(tok, "op_type") != 0) {
+    printf(" !! Header seems invalid, first token needs to be 'op_type' cannot continue\n");
+    return false;
+  }
+  // chunk_size token
+  tok = strtok(NULL, tok_delim_cm); 
+  if(tok == NULL || strcmp(tok, "chunk_size") != 0) {
+    printf(" !! Header seems invalid, second token needs to be 'chunk_size' cannot continue\n");
+    return false;
+  } 
+  // block token
+  tok = strtok(NULL, tok_delim_nl);
+  if(tok == NULL || strcmp(tok, "block") != 0) {
+    printf(" !! Header seems invalid, third token needs to be 'block' cannot continue\n");
+    return false;
+  } else {
+    printf(" -- Header seems valid, trying to parse plan\n");
+    return true;
+  }
+}
+
+bool
+parse_trace_line(char *line, alloc_plan_t *plan) {
+  return true;
+}
+
+/** 
  * Load allocation plan from trace file
  */
 alloc_plan_t *
-import_plan(char *fname, alloc_plan_t *plan) {
+import_alloc_plan(char *fname, alloc_plan_t *plan) {
+  // check if filename is null
   if(fname == NULL) {
     printf(" !! Error, cannot have null filename, cannot continue\n");
     return NULL;
   }
-
+  // check if plan is null
   if(plan == NULL) {
     printf(" !! Error, cannot have a null allocation plan, cannot continue\n");
     return NULL;
   }
-
   // open the file
   FILE *fp = fopen(fname, "r");
   if(fp == NULL) {
     printf(" !! Error, failed to open the file at: %s for reading\n", fname);
     return NULL;
   }
-  // todo
+  // initialize file parsing variables
+  char *fline = NULL;
+  size_t llen = 0;
+  size_t bytes_read = 0;
+  int lcnt = 1;
+  bool ret = false;
+  // loop through the file
+  while((bytes_read = getline(&fline, &llen, fp)) != -1) {
+    printf("Parsing line %d\n", lcnt);
+    // check header of the file
+    if(lcnt == 1) {
+      ret = check_trace_header(fline);
+    } else {
+      ret = parse_trace_line(fline, plan);
+    }
+    // check for possible errors
+    if(!ret) {
+      printf(" !! Error countered at line %d\n", lcnt);
+    }
+    lcnt++;
+  }
+
+  // clean up the line
+  if(fline) {
+    free(fline);
+  }
+
   return NULL;
 }
 
@@ -790,10 +865,12 @@ main(int argc, char **argv) {
   // our plan structure
   alloc_plan_t plan = {0};
   // check for successful allocation plan generation
-  if(!generate_alloc_plan(bench_trials, &plan)) {
-    return 0;
-  } 
+  //if(!gen_alloc_plan(bench_trials, &plan)) {
+  //  return 0;
+  //} 
+  import_alloc_plan("./imp.csv", &plan);
 
+  /*
   //print_plan(&plan);
 
   // now run the experiment
@@ -808,7 +885,7 @@ main(int argc, char **argv) {
   destroy_tlsf_pool(&pool);
   
   toc(c_ctx, tag, true);
-
+  */
   //print_plan(&plan);
 
   // dump the plan

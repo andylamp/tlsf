@@ -28,7 +28,13 @@ It also leverages the TLSF 2.0 improvement to shrink the per-block overhead from
 History
 -------
 
-2017/06/26 - v3.1.2
+2018/07/26 - v3.1.3
+  * added a `tlsf` benchmark with various modes of allocation schedules ([tlsfbench](./tlsf_bench.c))
+  * added `__builtin_*` checks using `autotools`
+  * ability to import an allocation trace and create an allocation plan based on it.
+  * export allocation plan execution details in csv
+
+2018/06/26 - v3.1.2
   * added an example ([example](./example.c))
   * moved build toolchain to `autotools`
   * added a build script ([`build.sh`](./build.sh))
