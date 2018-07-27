@@ -653,12 +653,12 @@ static block_header_t *block_locate_free(tlsf_t *tlsf, size_t size)
 		 */
 		if (fl < FL_INDEX_COUNT) {
 			block = search_suitable_block(tlsf, &fl, &sl);
-		}
-	}
 
-	if (block != NULL) {
-		tlsf_assert(block_size(block) >= size);
-		remove_free_block(tlsf, block, fl, sl);
+			if (block != NULL) {
+				tlsf_assert(block_size(block) >= size);
+				remove_free_block(tlsf, block, fl, sl);
+			}
+		}
 	}
 
 	return block;
