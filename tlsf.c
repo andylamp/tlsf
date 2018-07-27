@@ -415,9 +415,10 @@ static size_t adjust_request_size(size_t size, size_t align)
  * the documentation found in the white paper.
  */
 
-static void mapping_insert(size_t size, int *fli, int *sli)
+static void mapping_search(size_t size, int *fli, int *sli)
 {
-	int fl, sl;
+	int fl;
+	int sl;
 	if (size < SMALL_BLOCK_SIZE) {
 		/* Store small blocks in first list */
 		fl = 0;
@@ -429,16 +430,6 @@ static void mapping_insert(size_t size, int *fli, int *sli)
 	}
 	*fli = fl;
 	*sli = sl;
-}
-
-/* This version rounds up to the next block size (for allocations) */
-static void mapping_search(size_t size, int *fli, int *sli)
-{
-	if (size >= SMALL_BLOCK_SIZE) {
-		const size_t round = (1 << (tlsf_fls_sizet(size) - SL_INDEX_COUNT_LOG2)) - 1;
-		size += round;
-	}
-	mapping_insert(size, fli, sli);
 }
 
 static block_header_t *search_suitable_block(tlsf_t *tlsf, int *fli, int *sli)
@@ -522,7 +513,7 @@ static void insert_free_block(tlsf_t *tlsf, block_header_t *block, int fl, int s
 static void block_remove(tlsf_t *tlsf, block_header_t *block)
 {
 	int fl, sl;
-	mapping_insert(block_size(block), &fl, &sl);
+	mapping_search(block_size(block), &fl, &sl);
 	remove_free_block(tlsf, block, fl, sl);
 }
 
@@ -530,7 +521,7 @@ static void block_remove(tlsf_t *tlsf, block_header_t *block)
 static void block_insert(tlsf_t *tlsf, block_header_t *block)
 {
 	int fl, sl;
-	mapping_insert(block_size(block), &fl, &sl);
+	mapping_search(block_size(block), &fl, &sl);
 	insert_free_block(tlsf, block, fl, sl);
 }
 
@@ -649,12 +640,19 @@ static block_header_t *block_locate_free(tlsf_t *tlsf, size_t size)
 	block_header_t *block = NULL;
 
 	if (size > 0) {
+
+		/* Round up to the next block size (for allocations) */
+		if (size >= SMALL_BLOCK_SIZE) {
+			const size_t round = (1 << (tlsf_fls_sizet(size) - SL_INDEX_COUNT_LOG2)) - 1;
+			size += round;
+		}
+
 		mapping_search(size, &fl, &sl);
 
 		/*
-		 * mapping_search can futz with the size, so for excessively large sizes it can sometimes wind up
+		 * The above can futz with the size, so for excessively large sizes it can sometimes wind up
 		 * with indices that are off the end of the block array.
-		 * So, we protect against that here, since this is the only callsite of mapping_search.
+		 * So, we protect against that here.
 		 * Note that we don't need to check sl, since it comes from a modulo operation that guarantees it's always in range.
 		 */
 		if (fl < FL_INDEX_COUNT) {
@@ -762,7 +760,7 @@ int tlsf_check(tlsf_t *tlsf)
 				tlsf_insist(block_is_prev_free(block_next(block)) && "block should be free");
 				tlsf_insist(block_size(block) >= block_size_min && "block not minimum size");
 
-				mapping_insert(block_size(block), &fli, &sli);
+				mapping_search(block_size(block), &fli, &sli);
 				tlsf_insist(fli == i && sli == j && "block size indexed in wrong list");
 				block = block->next_free;
 			}
@@ -905,7 +903,7 @@ void tlsf_remove_pool(tlsf_t *tlsf, pool_t *pool)
 	tlsf_assert(!block_is_free(block_next(block)) && "next block should not be free");
 	tlsf_assert(block_size(block_next(block)) == 0 && "next block size should be zero");
 
-	mapping_insert(block_size(block), &fl, &sl);
+	mapping_search(block_size(block), &fl, &sl);
 	remove_free_block(tlsf, block, fl, sl);
 }
 
