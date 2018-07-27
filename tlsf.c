@@ -327,6 +327,12 @@ static block_header_t *offset_to_block(const void *ptr, size_t size)
 	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) + size - trailer_size);
 }
 
+/* Return first block of pool */
+static block_header_t *first_block(const void *ptr)
+{
+	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) - trailer_size);
+}
+
 /* Return location of previous block */
 static block_header_t *block_prev(const block_header_t *block)
 {
@@ -777,7 +783,7 @@ static void default_walker(void *ptr, size_t size, int used, void *user)
 void tlsf_walk_pool(pool_t *pool, tlsf_walker walker, void *user)
 {
 	tlsf_walker pool_walker = walker ? walker : default_walker;
-	block_header_t *block = offset_to_block(pool, 0);
+	block_header_t *block = first_block(pool);
 
 	while (block && !block_is_last(block)) {
 		pool_walker(
@@ -873,7 +879,7 @@ pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 	 * so that the prev_phys_block field falls outside of the pool -
 	 * it will never be used.
 	 */
-	block = offset_to_block(mem, 0);
+	block = first_block(mem);
 	block_set_size(block, pool_bytes);
 	block_set_free(block);
 	block_set_prev_used(block);
@@ -890,7 +896,7 @@ pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 
 void tlsf_remove_pool(tlsf_t *tlsf, pool_t *pool)
 {
-	block_header_t *block = offset_to_block(pool, 0);
+	block_header_t *block = first_block(pool);
 
 	int fl = 0;
 	int sl = 0;
