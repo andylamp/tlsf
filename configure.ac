@@ -21,6 +21,7 @@ AC_CONFIG_MACRO_DIR([m4])
 
 AX_GCC_BUILTIN([__builtin_ffs])
 AX_GCC_BUILTIN([__builtin_clzl])
+AX_GCC_BUILTIN([__builtin_ia32_rdtsc])
 
 AC_PROG_CC
 LT_INIT
