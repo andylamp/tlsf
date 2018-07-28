@@ -44,21 +44,31 @@ typedef struct _wtlsf_t  {
   size_t size;
 } wtlsf_t;
 
-/* allocation plan type */
+/* allocation plan types */
 typedef enum _alloc_plan_type_t {
   ALLOC_SEQ = 0,
   ALLOC_RAMP = 1,
   ALLOC_HAMMER = 2,
+  ALLOC_CUSTOM = 3,
   /* maybe more to be added? */
 } alloc_plan_type_t;
+
+/* allocation slot types */
+typedef enum _slot_type_t {
+  SLOT_EMPTY = 0,
+  SLOT_MALLOC = 1,
+  SLOT_FREE = 2,
+  /* possibly expand? */
+} slot_type_t;
 
 /* allocation plan helper */
 typedef struct _alloc_plan_t {
   // essentials
   char **mem_ptr;           // memory block pointers
+  //size_t *block_id;         // memory block id
   size_t *cur_malloc_size;  // current malloc size
   size_t *block_size;       // memory block actual size
-  bool *is_alloc;           // flag to show if it's for malloc or free
+  slot_type_t *slot_type;   // flag to show if it's for malloc or free
   // statistics
   size_t peak_alloc;        // peak allocation for this plan 
   size_t aggregated_alloc;  // aggregated allocation for this plan
@@ -107,12 +117,12 @@ bool parsing_out_traces = false;
 /**
  * tic: function that starts the timing context
  */
-clock_t
+unsigned long long
 tic(char *msg) {
   if(msg != NULL) {
     printf(" ** Tick (%s)\n", msg);
   }
-  return clock();
+  return __builtin_ia32_rdtsc();
 }
 
 /**
@@ -120,14 +130,14 @@ tic(char *msg) {
  * returns the difference as a double.
  */
 double
-toc(clock_t start, char *msg, bool print) {
-  clock_t end = clock();
-  double diff = ((double)(end - start)) / CLOCKS_PER_SEC;
+toc(unsigned long long start, char *msg, bool print) {
+  unsigned long long end = __builtin_ia32_rdtsc();
+  unsigned long long diff = ((end - start)); /// CLOCKS_PER_SEC;
   if(print) {
     if(msg) {
-      printf(" ** Toc (%s): Elapsed time %f seconds\n", msg, diff);
+      printf(" ** Toc (%s): Elapsed time %llu cycles\n", msg, diff);
     } else {
-      printf(" ** Toc: Elapsed time %f seconds\n", diff);
+      printf(" ** Toc: Elapsed time %llu cycles\n", diff);
     }
   }
   return diff;
@@ -188,10 +198,10 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
       //printf(" -- Tagging malloc block at: %d with size of %zu bytes\n", j, blk_size);
       // now tag allocation blocks
       plan->block_size[j] = blk_size;
-      plan->is_alloc[j] = true; 
+      plan->slot_type[j] = SLOT_MALLOC; 
       // now tag deallocation blocks
       plan->block_size[j+trail_size] = mem_alloc; // index in mem array instead of size
-      plan->is_alloc[j+trail_size] = false;
+      plan->slot_type[j+trail_size] = SLOT_FREE;
       mem_alloc++;
     }
     // add to aggregate
@@ -275,9 +285,9 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     free(plan->block_size);
     return false;
   }
-  // is_alloc array
-  if((plan->is_alloc = calloc(plan_size, sizeof(bool))) == NULL) {
-    printf(" !! Failed to allocate is_alloc array\n");
+  // slot type array
+  if((plan->slot_type = calloc(plan_size, sizeof(slot_type_t))) == NULL) {
+    printf(" !! Failed to allocate slot type array\n");
     free(plan->block_size);
     free(plan->timings);
     return false;
@@ -287,7 +297,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     printf(" !! Failed to allocate cur malloc size array\n");
     free(plan->block_size);
     free(plan->timings);
-    free(plan->is_alloc);
+    free(plan->slot_type);
     return false;
   }
   // mem_ptr
@@ -295,7 +305,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     printf(" !! Failed to allocate pointer array\n");
     free(plan->block_size);
     free(plan->timings);
-    free(plan->is_alloc);
+    free(plan->slot_type);
     free(plan->cur_malloc_size);
     return false;
   }
@@ -374,9 +384,9 @@ destroy_alloc_plan(alloc_plan_t *plan) {
     free(plan->block_size);
   }
   // check if we have a valid allocation type array
-  if(plan->is_alloc != NULL) {
+  if(plan->slot_type != NULL) {
     printf(" -- Valid allocation type array found, freeing\n");
-    free(plan->is_alloc);
+    free(plan->slot_type);
   }
   // check if we have a valid timings array
   if(plan->timings != NULL) {
@@ -516,19 +526,22 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
   int mem_pivot = 0;
   double timed_seg = 0;
   for (int i = 0; i < plan->plan_size; ++i) {
-    clock_t t = tic(NULL);
+    unsigned long long t = tic(NULL);
     // check if we have an allocation
-    if(plan->is_alloc[i]) {
+    if(plan->slot_type[i] == SLOT_MALLOC) {
       //printf(" -- Allocating block at %d with size %zu bytes\n", 
       //  i, plan->block_size[i]);
       plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
       plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
       mem_pivot++;
-    } else {
+    } else if(plan->slot_type[i] == SLOT_FREE) {
       int free_blk = (int) plan->block_size[i];
       //printf(" -- Freeing block at %d\n", free_blk);
       tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
       //plan->cur_malloc_size[free_blk] = 0;
+    } else {
+      // error
+      printf(" !! Error, encountered empty slot of a full plan\n");
     }
     timed_seg = toc(t, NULL, false);
     // insert the timed segment to array
@@ -550,6 +563,14 @@ tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void 
 tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
+  //TODO
+}
+
+/**
+ * Execute a scripted custom plan from file import
+ */
+void
+tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
   //TODO
 }
 
@@ -577,7 +598,7 @@ of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
   // basic info
   printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
     plan->plan_size, pool->size);
-  clock_t ctx = tic(NULL);
+  unsigned long long ctx = tic(NULL);
   // execute the sequential plan
   switch(plan->type) {
     case ALLOC_SEQ: {
@@ -592,6 +613,10 @@ of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
       tlsf_bench_hammer(pool, plan);
       break;
     }
+    case ALLOC_CUSTOM: {
+      tlsf_bench_custom(pool, plan);
+      break;
+    }
     default: {
       tlsf_bench_seq(pool, plan);
       break;
@@ -599,9 +624,9 @@ of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
   }
   // find the total elapsed time
   double elapsed = toc(ctx, NULL, false);
-  printf(" -- Finished %zu ops in pool, elapsed time for bench was %f seconds\n", 
+  printf(" -- Finished %zu ops in pool, elapsed cycles for bench was %f\n", 
     plan->plan_size, elapsed);
-  printf(" -- xput: %lf [malloc/free] ops/sec\n", plan->plan_size/elapsed);
+  printf(" -- xput: %lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
 }
 
 /**
@@ -746,16 +771,20 @@ dump_plan(alloc_plan_t *plan, char *fname) {
   size_t blk_cnt = 0;
   double exec_time = 0;
   for (int i = 0; i < plan->plan_size; ++i) {
-    char *op_type = plan->is_alloc[i] == true ? "malloc" : "free";
+    char *op_type = NULL;
     chunk_size = plan->block_size[i];
     exec_time = plan->timings[i];
     // differentiate allocation based on alloc/dealloc op
-    if(plan->is_alloc[i] == false) {
+    if(plan->slot_type[i] == SLOT_FREE) {
+      op_type = "free";
       free_chunk_size = plan->cur_malloc_size[chunk_size];
       fprintf(fp, "%s,%zu,%zu,%lf\n", op_type, free_chunk_size, chunk_size, exec_time);
-    } else {
+    } else if(plan->slot_type[i] == SLOT_MALLOC) {
+      op_type = "malloc";
       fprintf(fp, "%s,%zu,%zu,%lf\n", op_type, chunk_size, blk_cnt, exec_time);
       blk_cnt++;
+    } else {
+      printf(" !! Error encountered empty slot on a full plan\n");
     }
   }
   // close the file
@@ -824,7 +853,7 @@ bool
 parse_trace_line(char *line, int *line_no, int *malloc_cnt, alloc_plan_t *plan) {
   char *tok = NULL;
   size_t tok_cnt = 1;
-  bool is_alloc = false;
+  slot_type_t slot = SLOT_EMPTY;
   
   // handle op_type
   tok = strtok(line, tok_delim_cm);
@@ -834,10 +863,11 @@ parse_trace_line(char *line, int *line_no, int *malloc_cnt, alloc_plan_t *plan) 
     return false;
   } else if(strcmp("malloc", tok) == 0) {
     printf(" -- malloc op_type detected\n");
-    is_alloc = true;
+    slot = SLOT_MALLOC;
   } else if(strcmp("free", tok) == 0) {
     printf(" -- free op_type detected\n");
     // handle free op_type
+    slot = SLOT_FREE;
   } else {
     printf(" !! Error invalid op_type detected: '%s', expecting \
 either 'malloc' or 'free'\n", tok);
@@ -849,20 +879,21 @@ either 'malloc' or 'free'\n", tok);
 
   // handle chunk_size
   tok = strtok(NULL, tok_delim_cm);
-  size_t chunk_size = 0;
+  long chunk_size = 0;
   if(tok == NULL) {
     printf(" !! Error, encountered at line %d, NULL token at position %zu\n",
       *line_no, tok_cnt);
     return false;
   }
 
-  chunk_size = strtoul(tok, NULL, 10);
   errno = 0;
-  if((chunk_size == 0 || chunk_size == ULONG_MAX) && errno == EINVAL) {
+  chunk_size = strtol(tok, NULL, 10);
+  if(chunk_size <= 0 || chunk_size == ULLONG_MAX || errno == EINVAL) {
     printf(" !! Error, encountered at line %d, could not convert \
 token '%s' at position %zu to 'size_t'\n", *line_no, tok, tok_cnt);
+    return false;
   } else {
-    printf(" -- chunk_size of %zu bytes, parsed\n", chunk_size);
+    printf(" -- chunk_size of %ld bytes, parsed\n", chunk_size);
   }
 
   // increment token count
@@ -881,19 +912,33 @@ token '%s' at position %zu to 'size_t'\n", *line_no, tok, tok_cnt);
     if(tok == NULL) {
       printf(" !! Error, encountered at line %d, NULL token at position %zu\n",
         *line_no, tok_cnt);
+      return false;
     }
   }
   // parse the block
-  size_t block_id = 0;
+  long block_id = 0;
   errno = 0;
-  block_id = strtoul(tok, NULL, 10);
-  if((block_id == 0 || block_id == ULONG_MAX) && errno == EINVAL) {
+  block_id = strtol(tok, NULL, 10);
+  if(block_id < 0 || ((block_id == 0 || block_id == ULONG_MAX) && errno == EINVAL)) {
     printf(" !! Error, encountered at line %d, could not convert \
 token '%s' at position %zu to 'size_t'\n", *line_no, tok, tok_cnt);
+    return false;
+  } else if(block_id < plan->plan_size/2) {
+    printf(" !! Error, it appears block_id: %ld is larger than the \
+allowed limit plan_size/2 (%zu)\n", block_id, plan->plan_size/2);
+      return false;
   } else {
-    printf(" -- block_id %zu, parsed\n", block_id);
+    printf(" -- block_id %ld, parsed\n", block_id);
   }
-  
+
+  // calculate the index
+  int cur_idx = (*line_no)-1;
+  if(plan->slot_type[cur_idx] != SLOT_EMPTY) {
+    printf(" !! Error, encountered a non-empty slot in an unexpected position.\n");
+    return false;
+  }
+
+  // TODO finish plan population
 
   return true;
 }
@@ -904,9 +949,9 @@ token '%s' at position %zu to 'size_t'\n", *line_no, tok, tok_cnt);
 bool
 parse_plan_size(char *line, alloc_plan_t *plan) {
   long ret;
-  ret = strtoul(line, NULL, 10);
   errno = 0;
-  if((ret == 0 || ret == ULONG_MAX) && errno == EINVAL) {
+  ret = strtol(line, NULL, 10);
+  if(ret <= 0 || ret == ULONG_MAX || errno == EINVAL) {
     printf(" !! Error, could not parse the plan size number in the first line\n");
     return false;
   } else {
@@ -967,6 +1012,9 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
     lcnt++;
   }
 
+  // if all went well, set the plan type to be custom
+  plan->type = ALLOC_CUSTOM;
+
   // clean up the line
   if(fline) {
     free(fline);
@@ -986,17 +1034,21 @@ print_plan(alloc_plan_t *plan) {
   double exec_time = 0;
   printf(" ** Printing allocation plan details (size %zu)\n", plan->plan_size);
   for (int i = 0; i < plan->plan_size; ++i) {
-    char *op_type = plan->is_alloc[i] == true ? "malloc" : "free";
+    char *op_type = NULL;
     chunk_size = plan->block_size[i];
     exec_time = plan->timings[i];
     //printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, idx, i);
     // differentiate allocation based on alloc/dealloc op
-    if(plan->is_alloc[i] == false) {
+    if(plan->slot_type[i] == SLOT_FREE) {
+      op_type = "free";
       free_chunk_size = plan->cur_malloc_size[chunk_size];
       printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, free_chunk_size, exec_time, chunk_size, i);
-    } else {
+    } else if(plan->slot_type[i] == SLOT_MALLOC) {
+      op_type = "malloc";
       printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, blk_cnt, i);
       blk_cnt++;
+    } else {
+      printf(" !! Error, encountered empty slot on a full plan");
     }
   }
   printf(" ** End of allocation plan details print\n");
@@ -1018,17 +1070,16 @@ main(int argc, char **argv) {
   // our plan structure
   alloc_plan_t plan = {0};
   // check for successful allocation plan generation
-  //if(!gen_alloc_plan(bench_trials, &plan)) {
-  //  return 0;
-  //} 
-  import_alloc_plan("./imp.csv", &plan);
-
+  if(!gen_alloc_plan(bench_trials, &plan)) {
+    return 0;
+  } 
+  
   
   //print_plan(&plan);
-  /*
+  
   // now run the experiment
   char *tag = "Global Pool";
-  clock_t c_ctx = tic(tag);
+  unsigned long long c_ctx = tic(tag);
 
   // create the pool
   create_tlsf_pool(&pool, pool_size);
@@ -1043,7 +1094,7 @@ main(int argc, char **argv) {
 
   // dump the plan
   dump_plan(&plan, "mem_trace");
-  */
+  
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
   
