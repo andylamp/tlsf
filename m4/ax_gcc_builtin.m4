@@ -48,6 +48,7 @@
 #    __builtin_huge_val
 #    __builtin_huge_valf
 #    __builtin_huge_vall
+#    __builtin_ia32_rdtsc
 #    __builtin_inf
 #    __builtin_infd128
 #    __builtin_infd32
@@ -124,6 +125,7 @@ AC_DEFUN([AX_GCC_BUILTIN], [
                 [__builtin_huge_val], [$1()],
                 [__builtin_huge_valf], [$1()],
                 [__builtin_huge_vall], [$1()],
+                [__builtin_ia32_rdtsc], [$1()],
                 [__builtin_inf], [$1()],
                 [__builtin_infd128], [$1()],
                 [__builtin_infd32], [$1()],
