@@ -925,7 +925,8 @@ check_trace_header(char *header) {
  *             already executed plan. This field is *ignored*.
  */
 bool
-parse_trace_line(char *line, int *line_no, int *malloc_cnt, alloc_plan_t *plan) {
+parse_trace_line(char *line, int *line_no, int *malloc_cnt, 
+  size_t *cur_alloc, alloc_plan_t *plan) {
   char *tok = NULL;
   size_t tok_cnt = 1;
   slot_type_t slot = SLOT_EMPTY;
@@ -1024,6 +1025,10 @@ malloc is not valid, expecting: %d\n", (*line_no) + 1, block_id, *malloc_cnt);
     plan->malloc_tag_time[*malloc_cnt] = cur_idx; // set the malloc tagged time
     // increment the malloc counter
     (*malloc_cnt)++;
+    // update the current allocation size
+    *cur_alloc += chunk_size;
+    // add the aggregated allocation size
+    plan->aggregated_alloc += chunk_size;
   } else if(slot == SLOT_FREE) {
     // grab the corresponding malloc slot index
     int malloc_slot = plan->malloc_tag_time[block_id];
@@ -1035,11 +1040,19 @@ malloc (%zu)/free (%zu) do not match.\n",
       return false;
     }
     plan->slot_type[cur_idx] = SLOT_FREE;         // set the slot type
+    // update the current allocation size
+    *cur_alloc -= chunk_size;
   } else {
-    printf(" !! Error, encountered at line %d an unexpected free-slot type.\n", 
+    printf(" !! Error, encountered at line %d an unexpected empty-slot type.\n", 
       (*line_no) + 1);
     return false;
   }
+
+  // check if we need to adjust out peak allocation size
+  if(plan->peak_alloc < *cur_alloc) {
+    plan->peak_alloc = *cur_alloc;
+  }
+
   // after all the checks, finally return.
   return true;
 }
@@ -1084,10 +1097,13 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
     printf(" !! Error, failed to open the file at: %s for reading\n", fname);
     return NULL;
   }
+  plan->peak_alloc = 0;
+  plan->aggregated_alloc = 0;
   // initialize file parsing variables
   char *fline = NULL;
   size_t llen = 0;
   size_t bytes_read = 0;
+  size_t cur_alloc = 0;
   int lcnt = 0;
   int malloc_cnt = 0;
   bool ret = false;
@@ -1103,7 +1119,7 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
       ret = check_trace_header(fline);
     } else {
       // parse the actual traces
-      ret = parse_trace_line(fline, &lcnt, &malloc_cnt, plan);
+      ret = parse_trace_line(fline, &lcnt, &malloc_cnt, &cur_alloc, plan);
     }
     // check for possible errors
     if(!ret) {
@@ -1192,11 +1208,11 @@ main(int argc, char **argv) {
   // our plan structure
   alloc_plan_t plan = {0};
 
+  
   // check for successful allocation plan generation
   if(!gen_alloc_plan(bench_trials, &plan)) {
     return 0;
   } 
-  
   
   //print_plan(&plan);
   
