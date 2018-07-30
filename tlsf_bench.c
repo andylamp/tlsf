@@ -118,6 +118,15 @@ char *tok_delim_cm = ",";
 char *tok_delim_nl = "\n";
 bool parsing_out_traces = false;
 
+// command line argument config
+
+bool pflag = false; // import flag
+bool tflag = false; // custom trial flag
+bool dflag = false; // dump flag
+
+// import plan (-p)
+char *imp_fname = NULL;
+
 /**
  * Functions
  */
@@ -470,37 +479,58 @@ destroy_alloc_plan(alloc_plan_t *plan) {
  */
 bool
 parse_args(int argc, char **argv) {
+  // set opterr to 0 for silence
+  opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "t:p:")) != -1) {
+  while((c = getopt(argc, argv, "t:p:d")) != -1) {
     switch(c) {
       // parse plan size, if supplied
       case 't': {
-
+        // raise t flag
+        tflag = true;
         char *endp;
         long t_trials = strtol(optarg, &endp, 0);
         if(optarg != endp && *endp == '\0') {
           if(t_trials < min_trials) {
-            printf(" !! Too small trial number given (%zu), reverting to default %zu\n", 
+            printf(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
               t_trials, min_trials);
           } else {
             printf(" ** Trials set to %zu\n", t_trials);
             bench_trials = (size_t) t_trials;
           }
         } else {
-          printf(" !! Invalid argument supplied, reverting to default\n");
+          printf(" !! Error: Invalid argument supplied, reverting to default\n");
         }
         break;
       }
       // parse custom plan from file, if supplied
       case 'p': {
-        //TODO
+        // raise p flag
+        pflag = true;
+        // set the filename
+        imp_fname = optarg;
         break;
       }
+      case 'd': {
+        // raise the dump flag
+        dflag = true;
+      }
+      case '?': {
+        printf(" !! Error: argument -%c, requires an argument\n", optopt);
+        printf("\n    Usage: ./tlsfbench (-t ops) | (-p infile) \n");
+        return false;
+      }
       default: {
-        printf("unknown arg\n");
+        printf("   Usage: ./tlsfbench -d ((-t ops) | (-p infile)) \n");
+        return false;
         break;
       }
     }
+  }
+  // check for concurrent flags
+  if(pflag && tflag) {
+    printf(" !! Error: cannot have both -p and -t at the same time\n");
+    return false;
   }
   return true;
 }
@@ -1224,30 +1254,33 @@ print_plan(alloc_plan_t *plan) {
 }
 
 /**
- * Main stub
+ * Function that is a stub for executing the allocation plan
+ * either by using one of the built in ones or from parsing
+ * an existing trace.
  */
-int
-main(int argc, char **argv) {
-  printf("\n");
-  // initialize the random number generator
-  srand(2);
-  // parse arguments
-  parse_args(argc, argv);
-
+void 
+execute_plan() {
+  // return value
+  bool ret = false;
   // our pool structure
   wtlsf_t pool = {0};
   // our plan structure
   alloc_plan_t plan = {0};
 
-  // check for successful allocation plan generation
-  if(!gen_alloc_plan(bench_trials, &plan)) {
-    return 0;
-  } 
-  
-  //print_plan(&plan);
-  
+  // parse plan or generate one
+  if(pflag) {
+    ret = import_alloc_plan(imp_fname, &plan);
+  } else {
+    ret = gen_alloc_plan(bench_trials, &plan);
+  }
+
+  // check for result
+  if(!ret) {
+    printf(" !! Error, could not generate a valid plan -- aborting\n");
+  }
+
   // now run the experiment
-  char *tag = "Global Pool";
+  char *tag = "Global Tag";
   unsigned long long c_ctx = tic(tag);
 
   // create the pool
@@ -1262,11 +1295,30 @@ main(int argc, char **argv) {
   //print_plan(&plan);
 
   // dump the plan
-  dump_plan(&plan, dump_mem_trace_suffix);
+  if(dflag) {
+    dump_plan(&plan, dump_mem_trace_suffix); 
+  }
   
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
-  
+}
+
+/**
+ * Main stub
+ */
+int
+main(int argc, char **argv) {
   printf("\n");
+  // initialize the random number generator
+  srand(2);
+  // parse arguments
+  if(!parse_args(argc, argv)) {
+    return 0;
+  } 
+  
+  // execute our plan based on arguments  
+  execute_plan();
+  
+  // finally return
   return 0;
 }
