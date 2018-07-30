@@ -482,7 +482,7 @@ parse_args(int argc, char **argv) {
   // set opterr to 0 for silence
   opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "t:p:d")) != -1) {
+  while((c = getopt(argc, argv, "dt:p:")) != -1) {
     switch(c) {
       // parse plan size, if supplied
       case 't': {
@@ -511,13 +511,16 @@ parse_args(int argc, char **argv) {
         imp_fname = optarg;
         break;
       }
+      // dump the allocation plan to a trace file
       case 'd': {
         // raise the dump flag
         dflag = true;
+        break;
       }
+      // handle arguments that require a parameter
       case '?': {
-        printf(" !! Error: argument -%c, requires an argument\n", optopt);
-        printf("\n    Usage: ./tlsfbench (-t ops) | (-p infile) \n");
+        printf(" !! Error: argument -%c, requires an parameter\n", optopt);
+        printf("\n    Usage: ./tlsfbench -d ((-t ops) | (-p infile)) \n");
         return false;
       }
       default: {
@@ -998,10 +1001,10 @@ parse_trace_line(char *line, int *line_no, int *malloc_cnt,
       (*line_no) + 1, tok_cnt);
     return false;
   } else if(strcmp("malloc", tok) == 0) {
-    printf(" -- malloc op_type detected\n");
+    //printf(" -- malloc op_type detected\n");
     slot = SLOT_MALLOC;
   } else if(strcmp("free", tok) == 0) {
-    printf(" -- free op_type detected\n");
+    //printf(" -- free op_type detected\n");
     // handle free op_type
     slot = SLOT_FREE;
   } else {
@@ -1029,7 +1032,7 @@ either 'malloc' or 'free'\n", tok);
 token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
     return false;
   } else {
-    printf(" -- chunk_size of %ld bytes, parsed\n", chunk_size);
+    //printf(" -- chunk_size of %ld bytes, parsed\n", chunk_size);
   }
 
   // increment token count
@@ -1065,7 +1068,7 @@ token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
 allowed limit plan_size/2 (%zu)\n", block_id, plan->plan_size/2);
       return false;
   } else {
-    printf(" -- block_id %ld, parsed\n", block_id);
+    //printf(" -- block_id %ld, parsed\n", block_id);
   }
   
   // calculate the index
@@ -1170,7 +1173,7 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
   bool ret = false;
   // loop through the file
   while((bytes_read = getline(&fline, &llen, fp)) != -1) {
-    printf(" -- Parsing line %d of %zu bytes\n", lcnt+1, bytes_read);
+    //printf(" -- Parsing line %d of %zu bytes\n", lcnt+1, bytes_read);
     // checks for parse type
     if(lcnt == 0) {
       // parse first line, which preallocates the plan
@@ -1284,18 +1287,23 @@ execute_plan() {
   unsigned long long c_ctx = tic(tag);
 
   // create the pool
-  create_tlsf_pool(&pool, pool_size);
-  // now run the bench
-  tlsf_bench(&pool, &plan);
-  // destroy the pool
-  destroy_tlsf_pool(&pool);
-  
+  if(create_tlsf_pool(&pool, pool_size) == NULL) {
+    printf(" !! Error, fatal error encountered when creating the pool\n");
+    ret = false;
+  } else {  
+    // now run the bench
+    tlsf_bench(&pool, &plan);
+    // destroy the pool
+    destroy_tlsf_pool(&pool);
+  }
+
+  // timing point
   toc(c_ctx, tag, true);
   
   //print_plan(&plan);
 
   // dump the plan
-  if(dflag) {
+  if(dflag && ret) {
     dump_plan(&plan, dump_mem_trace_suffix); 
   }
   
