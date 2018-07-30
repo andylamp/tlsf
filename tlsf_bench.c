@@ -28,10 +28,10 @@
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
-// sys includes
+/* sys includes */
 #include <sys/types.h>
 #include <sys/stat.h>
-// intrinsics
+/* intrinsics */
 #include <x86intrin.h>
 
 /* tlsf lib */
@@ -76,10 +76,10 @@ typedef struct _alloc_plan_t {
   double *timings;          // timings for each op performed in the plan
   // misc. stuff
   // statistics
-  size_t peak_alloc;        // peak allocation for this plan 
+  size_t peak_alloc;        // peak allocation for this plan -- should be < pool_size 
   size_t aggregated_alloc;  // aggregated allocation for this plan
   // plan size
-  size_t plan_size;         // the plan size -- should be <= pool_size/2
+  size_t plan_size;         // the plan size
   // allocation plan type
   alloc_plan_type_t type;   // the plan type
 } alloc_plan_t;
@@ -592,11 +592,12 @@ destroy_tlsf_pool(wtlsf_t *pool) {
  */
 void
 tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
-  printf(" !! Running a sequential plan type of size: %zu\n", plan->plan_size);
+  printf(" !! Running a SEQUENTIAL plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
+  unsigned long long t_ctx = 0;
   for (int i = 0; i < plan->plan_size; ++i) {
-    unsigned long long t = tic(NULL);
+    t_ctx = tic(NULL);
     // check if we have an allocation
     if(plan->slot_type[i] == SLOT_MALLOC) {
       //printf(" -- Allocating block at %d with size %zu bytes\n", 
@@ -608,16 +609,19 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
       int free_blk = (int) plan->block_id[i];
       //printf(" -- Freeing block at %d\n", free_blk);
       tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      // explicitly NULL the pointer
+      plan->mem_ptr[free_blk] = NULL;
       //plan->cur_malloc_size[free_blk] = 0;
     } else {
       // error
       printf(" !! Error, encountered empty slot of a full plan\n");
     }
-    timed_seg = toc(t, NULL, false);
-    // insert the timed segment to array
+    // calculate timing delta
+    timed_seg = toc(t_ctx, NULL, NULL);
+    // add the timed segment to the timing array
     plan->timings[i] = timed_seg;
   }
-  assert(mem_pivot == plan->plan_size/2);
+  assert(mem_pivot == plan->plan_size / 2);
 }
 
 /**
@@ -625,6 +629,7 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void
 tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
+  printf(" !! Running a RAMP plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
 
@@ -633,6 +638,7 @@ tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void 
 tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
+  printf(" !! Running a HAMMER plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
 
@@ -641,7 +647,31 @@ tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void
 tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
-  //TODO
+  printf(" !! Running a CUSTOM plan type of size: %zu\n", plan->plan_size);
+  int mem_pivot = 0;
+  double timed_seg = 0;
+  unsigned long long t_ctx = 0;
+  for (int i = 0; i < plan->plan_size; ++i) {
+    t_ctx = tic(NULL);
+    if(plan->slot_type[i] == SLOT_MALLOC) {
+      // allocate the block to the designated slot
+      plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
+      mem_pivot++;
+    } else if(plan->slot_type[i] == SLOT_FREE) {
+      // free the block
+      tlsf_free(pool->tlsf_ptr, plan->mem_ptr[plan->block_id[i]]);
+      // explicitly NULL the pointer
+      plan->mem_ptr[plan->block_id[i]] = NULL;
+    } else {
+      printf(" !! Error, encountered empty slot on a full plan\n");
+    }
+    // calculate timing delta
+    timed_seg = toc(t_ctx, NULL, NULL);
+    // add the timed segment to the timing array
+    plan->timings[i] = timed_seg;
+  }
+  assert(mem_pivot == plan->plan_size / 2);
 }
 
 /**
@@ -1011,6 +1041,7 @@ allowed limit plan_size/2 (%zu)\n", block_id, plan->plan_size/2);
   // calculate the index
   int cur_idx = (*line_no)-line_offset;
   plan->block_id[cur_idx] = block_id;
+  plan->block_size[cur_idx] = chunk_size;
   if(plan->slot_type[cur_idx] != SLOT_EMPTY) {
     printf(" !! Error, encountered at line %d a non-empty slot in an unexpected \
 position.\n", (*line_no) + 1);
@@ -1208,7 +1239,6 @@ main(int argc, char **argv) {
   // our plan structure
   alloc_plan_t plan = {0};
 
-  
   // check for successful allocation plan generation
   if(!gen_alloc_plan(bench_trials, &plan)) {
     return 0;
