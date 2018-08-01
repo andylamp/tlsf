@@ -640,14 +640,15 @@ static block_header_t *block_locate_free(tlsf_t *tlsf, size_t size)
 	block_header_t *block = NULL;
 
 	if (size > 0) {
+		size_t adjusted = size;
 
 		/* Round up to the next block size (for allocations) */
 		if (size >= SMALL_BLOCK_SIZE) {
 			const size_t round = (1 << (tlsf_fls_sizet(size) - SL_INDEX_COUNT_LOG2)) - 1;
-			size += round;
+			adjusted += round;
 		}
 
-		mapping_search(size, &fl, &sl);
+		mapping_search(adjusted, &fl, &sl);
 
 		/*
 		 * The above can futz with the size, so for excessively large sizes it can sometimes wind up
