@@ -17,7 +17,7 @@ main(int argc, char **argv)
 	int oom_count = 0;
 
 	tlsf_t *tlsf = tlsf_create(ctrl);
-	pool_t *pool = tlsf_add_pool(tlsf, memory, memory_size);
+	tlsf_pool_t *pool = tlsf_add_pool(tlsf, memory, memory_size);
 
 	printf("tlsf_size()=%zu\n", tlsf_size());
 	printf("tlsf_align_size()=%zu\n", tlsf_align_size());

@@ -846,7 +846,7 @@ static void default_walker(void *ptr, size_t size, int used, void *user)
 	printf("\t%p %s size: %x (%p)\n", ptr, used ? "used" : "free", (unsigned int)size, block_from_ptr(ptr));
 }
 
-void tlsf_walk_pool(pool_t *pool, tlsf_walker walker, void *user)
+void tlsf_walk_pool(tlsf_pool_t *pool, tlsf_walker walker, void *user)
 {
 	tlsf_walker pool_walker = walker ? walker : default_walker;
 	block_header_t *block = first_block(pool);
@@ -874,7 +874,7 @@ size_t tlsf_block_size(void *ptr)
 	return size;
 }
 
-int tlsf_check_pool(pool_t *pool)
+int tlsf_check_pool(tlsf_pool_t *pool)
 {
 	/* Check that the blocks are physically correct */
 	integrity_t integ = { 0, 0 };
@@ -922,7 +922,7 @@ size_t tlsf_alloc_overhead(void)
 	return metadata_size;
 }
 
-pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
+tlsf_pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 {
 	block_header_t *block;
 	block_header_t *next;
@@ -970,7 +970,7 @@ pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 	return mem;
 }
 
-void tlsf_remove_pool(tlsf_t *tlsf, pool_t *pool)
+void tlsf_remove_pool(tlsf_t *tlsf, tlsf_pool_t *pool)
 {
 	block_header_t *block = first_block(pool);
 	ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
@@ -1055,9 +1055,9 @@ void tlsf_destroy(tlsf_t *tlsf)
 	(void)tlsf;
 }
 
-pool_t *tlsf_get_pool(tlsf_t *tlsf)
+tlsf_pool_t *tlsf_get_pool(tlsf_t *tlsf)
 {
-	return tlsf_cast(pool_t *, (char *)tlsf + tlsf_size());
+	return tlsf_cast(tlsf_pool_t *, (char *)tlsf + tlsf_size());
 }
 
 void *tlsf_malloc(tlsf_t *tlsf, size_t size)
