@@ -69,6 +69,9 @@ void tlsf_free(tlsf_t *tlsf, void *ptr);
 /* Returns internal block size, not original request size */
 size_t tlsf_block_size(void *ptr);
 
+/* Returns TLSF structure used for allocation of pointer */
+tlsf_t *tlsf_from_ptr(void *ptr);
+
 /* Overheads/limits of internal structures */
 size_t tlsf_size(void);
 size_t tlsf_align_size(void);
