@@ -874,6 +874,18 @@ size_t tlsf_block_size(void *ptr)
 	return size;
 }
 
+tlsf_t *tlsf_from_ptr(void *ptr)
+{
+	const block_header_t *block = block_from_ptr(ptr);
+	tlsf_t *tlsf;
+
+	ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+	tlsf = block->metadata.tlsf;
+	ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+
+	return tlsf;
+}
+
 int tlsf_check_pool(tlsf_pool_t *pool)
 {
 	/* Check that the blocks are physically correct */
@@ -1167,6 +1179,7 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 	}
 	/* Requests with NULL pointers are treated as malloc */
 	else if (ptr == NULL) {
+		tlsf_assert(tlsf != NULL && "realloc with NULL pointer requires heap argument");
 		p = tlsf_malloc(tlsf, size);
 	} else {
 		block_header_t *block = block_from_ptr(ptr);
@@ -1178,6 +1191,12 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 		const size_t combined = cursize + block_size(next) + metadata_size;
 		const size_t adjust = adjust_request_size(size, ALIGN_SIZE);
 
+		if (tlsf == NULL) {
+			tlsf = block->metadata.tlsf;
+		} else {
+			tlsf_assert(tlsf == block->metadata.tlsf && "invalid heap");
+		}
+
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
 
 		/*
@@ -1185,6 +1204,7 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 		 * block, does not offer enough space, we must reallocate and copy.
 		 */
 		if (adjust > cursize && (!block_is_free(next) || adjust > combined)) {
+
 			ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 			ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 			p = tlsf_malloc(tlsf, size);
