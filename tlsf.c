@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "tlsf.h"
+#include "asan.h"
 
 #if HAVE_CONFIG_H
 #include "config.h"
@@ -204,11 +205,17 @@ typedef struct block_header {
  		 * The last two bits are used for flags.
  		 */
 		size_t size;
+		/*
+		 * The heap this allocation belongs to
+ 		 */
+		tlsf_t *tlsf;
 	} metadata;
 
-	/* Next and previous free blocks */
-	struct block_header *next_free;
-	struct block_header *prev_free;
+	struct free_list {
+		/* Next and previous free blocks */
+		struct block_header *next_free;
+		struct block_header *prev_free;
+	} free_list;
 } block_header_t;
 
 /*
@@ -234,8 +241,7 @@ static const size_t trailer_size = sizeof(struct trailer);
 
 
 /* User data starts directly after the metadata record in a used block */
-static const size_t block_start_offset =
-	offsetof(block_header_t, metadata) + sizeof(struct metadata);
+static const size_t block_start_offset = offsetof(block_header_t, free_list);
 
 /*
  * A free block must be large enough to store its header minus the size of
@@ -321,48 +327,66 @@ static void *block_to_ptr(const block_header_t *block)
 		tlsf_cast(unsigned char *, block) + block_start_offset);
 }
 
-/* Return location of next block after block of given size */
-static block_header_t *offset_to_block(const void *ptr, size_t size)
+/* Return first block of pool */
+static block_header_t *first_block(const void *ptr)
 {
-	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) + size - trailer_size);
+	return tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, ptr) - trailer_size);
 }
 
 /* Return location of previous block */
+// ASAN pre: unpoisoned metadata: block
+// ASAN temporarily unpoisons trailer
 static block_header_t *block_prev(const block_header_t *block)
 {
 	tlsf_assert(block_is_prev_free(block) && "previous block must be free");
-	return block->prev_trailer.prev_phys_block;
+	ASAN_UNPOISON_MEMORY_REGION(&block->prev_trailer, sizeof(struct trailer));
+	block_header_t *prev = block->prev_trailer.prev_phys_block;
+	ASAN_POISON_MEMORY_REGION(&block->prev_trailer, sizeof(struct trailer));
+	return prev;
 }
 
 /* Return location of next existing block */
 static block_header_t *block_next(const block_header_t *block)
 {
-	block_header_t *next = offset_to_block(block_to_ptr(block),
-		block_size(block));
+	size_t size = block_size(block);
+	block_header_t *next = tlsf_cast(block_header_t *, tlsf_cast(ptrdiff_t, block) + size + metadata_size);
 	tlsf_assert(!block_is_last(block));
 	return next;
 }
 
-/* Link a new block with its physical neighbor, return the neighbor */
-static block_header_t *block_link_next(block_header_t *block)
+/* Link a new block with its physical neighbor */
+// ASAN pre: unpoisoned metadata: block
+static void block_link_next(block_header_t *block)
 {
 	block_header_t *next = block_next(block);
+	ASAN_UNPOISON_MEMORY_REGION(&next->prev_trailer, sizeof(struct trailer));
 	next->prev_trailer.prev_phys_block = block;
-	return next;
+	ASAN_POISON_MEMORY_REGION(&next->prev_trailer, sizeof(struct trailer));
 }
 
+// ASAN epxects unpoisoned metadata block
+// ASAN leaves it unpoisoned
+// ASAN temporarily unpoisons next block
 static void block_mark_as_free(block_header_t *block)
 {
 	/* Link the block to the next block, first */
-	block_header_t *next = block_link_next(block);
+	block_link_next(block);
+	block_header_t *next = block_next(block);
+	ASAN_UNPOISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 	block_set_prev_free(next);
+	ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 	block_set_free(block);
 }
 
+// ASAN pre: unpoisoned metadata block
+// ASAN post: unpoisoned metadata block
+// ASAN temporarily unpoisons next block
 static void block_mark_as_used(block_header_t *block)
 {
 	block_header_t *next = block_next(block);
+	ASAN_UNPOISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 	block_set_prev_used(next);
+	ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 	block_set_used(block);
 }
 
@@ -409,9 +433,10 @@ static size_t adjust_request_size(size_t size, size_t align)
  * the documentation found in the white paper.
  */
 
-static void mapping_insert(size_t size, int *fli, int *sli)
+static void mapping_search(size_t size, int *fli, int *sli)
 {
-	int fl, sl;
+	int fl;
+	int sl;
 	if (size < SMALL_BLOCK_SIZE) {
 		/* Store small blocks in first list */
 		fl = 0;
@@ -423,16 +448,6 @@ static void mapping_insert(size_t size, int *fli, int *sli)
 	}
 	*fli = fl;
 	*sli = sl;
-}
-
-/* This version rounds up to the next block size (for allocations) */
-static void mapping_search(size_t size, int *fli, int *sli)
-{
-	if (size >= SMALL_BLOCK_SIZE) {
-		const size_t round = (1 << (tlsf_fls_sizet(size) - SL_INDEX_COUNT_LOG2)) - 1;
-		size += round;
-	}
-	mapping_insert(size, fli, sli);
 }
 
 static block_header_t *search_suitable_block(tlsf_t *tlsf, int *fli, int *sli)
@@ -462,18 +477,34 @@ static block_header_t *search_suitable_block(tlsf_t *tlsf, int *fli, int *sli)
 	*sli = sl;
 
 	/* Return the first block in the free list */
-	return tlsf->blocks[fl][sl];
+	block_header_t *block = tlsf->blocks[fl][sl];
+
+	ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+
+	return block;
 }
 
 /* Remove a free block from the free list */
+// ASAN pre: unpoisoned metadata block
+// ASAN temporarily unpoisons block/next/prev free list
 static void remove_free_block(tlsf_t *tlsf, block_header_t *block, int fl, int sl)
 {
-	block_header_t *prev = block->prev_free;
-	block_header_t *next = block->next_free;
+	ASAN_UNPOISON_MEMORY_REGION(&block->free_list, sizeof(struct free_list));
+	block_header_t *prev = block->free_list.prev_free;
+	block_header_t *next = block->free_list.next_free;
+	ASAN_POISON_MEMORY_REGION(&block->free_list, sizeof(struct free_list));
+
 	tlsf_assert(prev && "prev_free field can not be null");
 	tlsf_assert(next && "next_free field can not be null");
-	next->prev_free = prev;
-	prev->next_free = next;
+
+	ASAN_UNPOISON_MEMORY_REGION(&next->free_list, sizeof(struct free_list));
+	ASAN_UNPOISON_MEMORY_REGION(&prev->free_list, sizeof(struct free_list));
+
+	next->free_list.prev_free = prev;
+	prev->free_list.next_free = next;
+
+	ASAN_POISON_MEMORY_REGION(&next->free_list, sizeof(struct free_list));
+	ASAN_POISON_MEMORY_REGION(&prev->free_list, sizeof(struct free_list));
 
 	/* If this block is the head of the free list, set new head */
 	if (tlsf->blocks[fl][sl] == block) {
@@ -492,14 +523,20 @@ static void remove_free_block(tlsf_t *tlsf, block_header_t *block, int fl, int s
 }
 
 /* Insert a free block into the free block list */
+// ASAN temporarily unpoisons free list of current free list head
 static void insert_free_block(tlsf_t *tlsf, block_header_t *block, int fl, int sl)
 {
 	block_header_t *current = tlsf->blocks[fl][sl];
 	tlsf_assert(current && "free list cannot have a null entry");
 	tlsf_assert(block && "cannot insert a null entry into the free list");
-	block->next_free = current;
-	block->prev_free = &tlsf->block_null;
-	current->prev_free = block;
+
+	ASAN_UNPOISON_MEMORY_REGION(&current->free_list, sizeof(struct free_list));
+	ASAN_UNPOISON_MEMORY_REGION(&block->free_list, sizeof(struct free_list));
+	block->free_list.next_free = current;
+	block->free_list.prev_free = &tlsf->block_null;
+	current->free_list.prev_free = block;
+	ASAN_POISON_MEMORY_REGION(&current->free_list, sizeof(struct free_list));
+	ASAN_POISON_MEMORY_REGION(&block->free_list, sizeof(struct free_list));
 
 	tlsf_assert(block_to_ptr(block) == align_ptr(block_to_ptr(block), ALIGN_SIZE)
 		&& "block not aligned properly");
@@ -513,88 +550,103 @@ static void insert_free_block(tlsf_t *tlsf, block_header_t *block, int fl, int s
 }
 
 /* Remove a given block from the free list */
+// ASAN pre: unpoisoned metadata block
 static void block_remove(tlsf_t *tlsf, block_header_t *block)
 {
 	int fl, sl;
-	mapping_insert(block_size(block), &fl, &sl);
+	mapping_search(block_size(block), &fl, &sl);
 	remove_free_block(tlsf, block, fl, sl);
 }
 
 /* Insert a given block into the free list */
+// ASAN pre: unpoisoned metadata block
 static void block_insert(tlsf_t *tlsf, block_header_t *block)
 {
 	int fl, sl;
-	mapping_insert(block_size(block), &fl, &sl);
+	mapping_search(block_size(block), &fl, &sl);
 	insert_free_block(tlsf, block, fl, sl);
 }
 
+// ASAN pre: unpoisoned metadata block
 static int block_can_split(block_header_t *block, size_t size)
 {
 	return block_size(block) >= sizeof(block_header_t) + size;
 }
 
 /* Split a block into two, the second of which is free */
-static block_header_t *block_split(block_header_t *block, size_t size)
+// ASAN pre: unpoisoned metadata block
+// ASAN post: unpoisoned metadata block, unpoisoned result
+static block_header_t *block_split(block_header_t *block, size_t new_size)
 {
-	/* Calculate the amount of space left in the remaining block */
-	block_header_t *remaining =
-		offset_to_block(block_to_ptr(block), size);
+	const size_t old_size = block_size(block);
 
-	const size_t remain_size = block_size(block) - (size + metadata_size);
+	block_set_size(block, new_size);
+
+	/* Calculate the amount of space left in the remaining block */
+	block_header_t *remaining = block_next(block);
+	ASAN_UNPOISON_MEMORY_REGION(&remaining->metadata, sizeof(struct metadata));
 
 	tlsf_assert(block_to_ptr(remaining) == align_ptr(block_to_ptr(remaining), ALIGN_SIZE)
 		&& "remaining block not aligned properly");
 
-	tlsf_assert(block_size(block) == remain_size + size + metadata_size);
+	const size_t remain_size = old_size - (new_size + metadata_size);
+	tlsf_assert(remain_size >= block_size_min && "block split with invalid size");
 	block_set_size(remaining, remain_size);
-	tlsf_assert(block_size(remaining) >= block_size_min && "block split with invalid size");
-
-	block_set_size(block, size);
+	// Less frequent to set this here instead of in block_prepare_used()
+	remaining->metadata.tlsf = block->metadata.tlsf;
 	block_mark_as_free(remaining);
+
 
 	return remaining;
 }
 
 /* Absorb a free block's storage into an adjacent previous free block */
-static block_header_t *block_absorb(block_header_t *prev, block_header_t *block)
+// ASAN expect unpoisoned prev, block
+// ASAN leaves them unpoisoned
+static void block_absorb(block_header_t *prev, block_header_t *block)
 {
 	tlsf_assert(!block_is_last(prev) && "previous block can't be last");
 	/* Note: Leaves flags untouched */
 	prev->metadata.size += block_size(block) + metadata_size;
 	block_link_next(prev);
-	return prev;
 }
 
 /* Merge a just-freed block with an adjacent previous free block */
-static block_header_t *block_merge_prev(tlsf_t *tlsf, block_header_t *block)
+// ASAN pre expect unpoisoned header for block
+// ASAN post return unpoisoned header for merged block
+static void block_merge_prev(tlsf_t *tlsf, block_header_t **block)
 {
-	if (block_is_prev_free(block)) {
-		block_header_t *prev = block_prev(block);
+	if (block_is_prev_free(*block)) {
+		block_header_t *prev = block_prev(*block);
+		ASAN_UNPOISON_MEMORY_REGION(&prev->metadata, sizeof(struct metadata));
 		tlsf_assert(prev && "prev physical block can't be null");
 		tlsf_assert(block_is_free(prev) && "prev block is not free though marked as such");
 		block_remove(tlsf, prev);
-		block = block_absorb(prev, block);
+		block_absorb(prev, *block);
+		ASAN_POISON_MEMORY_REGION(&(*block)->metadata, sizeof(struct metadata));
+		*block = prev;
 	}
-
-	return block;
 }
 
 /* Merge a just-freed block with an adjacent free block */
-static block_header_t *block_merge_next(tlsf_t *tlsf, block_header_t *block)
+// ASAN expect unpoisoned header for block, leave it unpoisoned
+static void block_merge_next(tlsf_t *tlsf, block_header_t *block)
 {
 	block_header_t *next = block_next(block);
 	tlsf_assert(next && "next physical block can't be null");
+	ASAN_UNPOISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 
 	if (block_is_free(next)) {
 		tlsf_assert(!block_is_last(block) && "previous block can't be last");
 		block_remove(tlsf, next);
-		block = block_absorb(block, next);
+		block_absorb(block, next);
 	}
-
-	return block;
+	ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 }
 
 /* Trim any trailing block space off the end of a block, return to pool */
+// ASAN pre unpoisoned metadata block
+// ASAN post unpoisoned metadata block
 static void block_trim_free(tlsf_t *tlsf, block_header_t *block, size_t size)
 {
 	tlsf_assert(block_is_free(block) && "block must be free");
@@ -603,10 +655,13 @@ static void block_trim_free(tlsf_t *tlsf, block_header_t *block, size_t size)
 		block_link_next(block);
 		block_set_prev_free(remaining_block);
 		block_insert(tlsf, remaining_block);
+		ASAN_POISON_MEMORY_REGION(&remaining_block->metadata, sizeof(struct metadata));
 	}
 }
 
 /* Trim any trailing block space off the end of a used block, return to pool */
+// ASAN pre unpoisoned metadata block
+// ASAN post unpoisoned metadata block
 static void block_trim_used(tlsf_t *tlsf, block_header_t *block, size_t size)
 {
 	tlsf_assert(!block_is_free(block) && "block must be used");
@@ -615,27 +670,31 @@ static void block_trim_used(tlsf_t *tlsf, block_header_t *block, size_t size)
 		block_header_t *remaining_block = block_split(block, size);
 		block_set_prev_used(remaining_block);
 
-		remaining_block = block_merge_next(tlsf, remaining_block);
+		block_merge_next(tlsf, remaining_block);
 		block_insert(tlsf, remaining_block);
+		ASAN_POISON_MEMORY_REGION(&remaining_block->metadata, sizeof(struct metadata));
 	}
 }
 
 /* If possible, create a trailing free block after trimming given block by size */
-static block_header_t *block_trim_free_leading(tlsf_t *tlsf, block_header_t *block, size_t size)
+// ASAN pre unpoisoned metadata block
+// ASAN post unpoisoned return, block should not be used
+static void block_trim_free_leading(tlsf_t *tlsf, block_header_t **block, size_t size)
 {
-	block_header_t *remaining_block = block;
-	if (block_can_split(block, size)) {
+	block_header_t *remaining_block = *block;
+	if (block_can_split(*block, size)) {
 		/* We want the 2nd block */
-		remaining_block = block_split(block, size - metadata_size);
+		remaining_block = block_split(*block, size - metadata_size);
 		block_set_prev_free(remaining_block);
 
-		block_link_next(block);
-		block_insert(tlsf, block);
+		block_link_next(*block);
+		block_insert(tlsf, *block);
+		ASAN_POISON_MEMORY_REGION(&(*block)->metadata, sizeof(struct metadata));
+		*block = remaining_block;
 	}
-
-	return remaining_block;
 }
 
+// ASAN post: unpoisoned metadata block
 static block_header_t *block_locate_free(tlsf_t *tlsf, size_t size)
 {
 	int fl = 0;
@@ -643,22 +702,30 @@ static block_header_t *block_locate_free(tlsf_t *tlsf, size_t size)
 	block_header_t *block = NULL;
 
 	if (size > 0) {
-		mapping_search(size, &fl, &sl);
+		size_t adjusted = size;
+
+		/* Round up to the next block size (for allocations) */
+		if (size >= SMALL_BLOCK_SIZE) {
+			const size_t round = (1 << (tlsf_fls_sizet(size) - SL_INDEX_COUNT_LOG2)) - 1;
+			adjusted += round;
+		}
+
+		mapping_search(adjusted, &fl, &sl);
 
 		/*
-		 * mapping_search can futz with the size, so for excessively large sizes it can sometimes wind up
+		 * The above can futz with the size, so for excessively large sizes it can sometimes wind up
 		 * with indices that are off the end of the block array.
-		 * So, we protect against that here, since this is the only callsite of mapping_search.
+		 * So, we protect against that here.
 		 * Note that we don't need to check sl, since it comes from a modulo operation that guarantees it's always in range.
 		 */
 		if (fl < FL_INDEX_COUNT) {
 			block = search_suitable_block(tlsf, &fl, &sl);
-		}
-	}
 
-	if (block != NULL) {
-		tlsf_assert(block_size(block) >= size);
-		remove_free_block(tlsf, block, fl, sl);
+			if (block != NULL) {
+				tlsf_assert(block_size(block) >= size);
+				remove_free_block(tlsf, block, fl, sl);
+			}
+		}
 	}
 
 	return block;
@@ -671,7 +738,10 @@ static void *block_prepare_used(tlsf_t *tlsf, block_header_t *block, size_t size
 		tlsf_assert(size && "size must be non-zero");
 		block_trim_free(tlsf, block, size);
 		block_mark_as_used(block);
+		assert(block->metadata.tlsf == tlsf);
 		p = block_to_ptr(block);
+		ASAN_UNPOISON_MEMORY_REGION(p, block_size(block));
+		ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 	}
 	return p;
 }
@@ -681,8 +751,8 @@ static void control_construct(tlsf_t *tlsf)
 {
 	int i, j;
 
-	tlsf->block_null.next_free = &tlsf->block_null;
-	tlsf->block_null.prev_free = &tlsf->block_null;
+	tlsf->block_null.free_list.next_free = &tlsf->block_null;
+	tlsf->block_null.free_list.prev_free = &tlsf->block_null;
 
 	tlsf->fl_bitmap = 0;
 	for (i = 0; i < FL_INDEX_COUNT; i++) {
@@ -691,6 +761,8 @@ static void control_construct(tlsf_t *tlsf)
 			tlsf->blocks[i][j] = &tlsf->block_null;
 		}
 	}
+
+	ASAN_POISON_MEMORY_REGION(&tlsf->block_null.free_list, sizeof(struct free_list));
 }
 
 /*
@@ -756,9 +828,9 @@ int tlsf_check(tlsf_t *tlsf)
 				tlsf_insist(block_is_prev_free(block_next(block)) && "block should be free");
 				tlsf_insist(block_size(block) >= block_size_min && "block not minimum size");
 
-				mapping_insert(block_size(block), &fli, &sli);
+				mapping_search(block_size(block), &fli, &sli);
 				tlsf_insist(fli == i && sli == j && "block size indexed in wrong list");
-				block = block->next_free;
+				block = block->free_list.next_free;
 			}
 		}
 	}
@@ -774,10 +846,10 @@ static void default_walker(void *ptr, size_t size, int used, void *user)
 	printf("\t%p %s size: %x (%p)\n", ptr, used ? "used" : "free", (unsigned int)size, block_from_ptr(ptr));
 }
 
-void tlsf_walk_pool(pool_t *pool, tlsf_walker walker, void *user)
+void tlsf_walk_pool(tlsf_pool_t *pool, tlsf_walker walker, void *user)
 {
 	tlsf_walker pool_walker = walker ? walker : default_walker;
-	block_header_t *block = offset_to_block(pool, 0);
+	block_header_t *block = first_block(pool);
 
 	while (block && !block_is_last(block)) {
 		pool_walker(
@@ -794,12 +866,27 @@ size_t tlsf_block_size(void *ptr)
 	size_t size = 0;
 	if (ptr != NULL) {
 		const block_header_t *block = block_from_ptr(ptr);
+
+		ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 		size = block_size(block);
+		ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 	}
 	return size;
 }
 
-int tlsf_check_pool(pool_t *pool)
+tlsf_t *tlsf_from_ptr(void *ptr)
+{
+	const block_header_t *block = block_from_ptr(ptr);
+	tlsf_t *tlsf;
+
+	ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+	tlsf = block->metadata.tlsf;
+	ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+
+	return tlsf;
+}
+
+int tlsf_check_pool(tlsf_pool_t *pool)
 {
 	/* Check that the blocks are physically correct */
 	integrity_t integ = { 0, 0 };
@@ -847,7 +934,7 @@ size_t tlsf_alloc_overhead(void)
 	return metadata_size;
 }
 
-pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
+tlsf_pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 {
 	block_header_t *block;
 	block_header_t *next;
@@ -873,34 +960,46 @@ pool_t *tlsf_add_pool(tlsf_t *tlsf, void *mem, size_t bytes)
 	 * so that the prev_phys_block field falls outside of the pool -
 	 * it will never be used.
 	 */
-	block = offset_to_block(mem, 0);
+	block = first_block(mem);
 	block_set_size(block, pool_bytes);
 	block_set_free(block);
 	block_set_prev_used(block);
 	block_insert(tlsf, block);
+	block->metadata.tlsf = tlsf;
 
 	/* Split the block to create a zero-size sentinel block */
-	next = block_link_next(block);
+	next = block_next(block);
+	block_link_next(block);
 	block_set_size(next, 0);
 	block_set_used(next);
 	block_set_prev_free(next);
+	next->metadata.tlsf = tlsf;
+
+	ASAN_POISON_MEMORY_REGION(block_to_ptr(block), block_size(block));
+	ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+	ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 
 	return mem;
 }
 
-void tlsf_remove_pool(tlsf_t *tlsf, pool_t *pool)
+void tlsf_remove_pool(tlsf_t *tlsf, tlsf_pool_t *pool)
 {
-	block_header_t *block = offset_to_block(pool, 0);
+	block_header_t *block = first_block(pool);
+	ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+	block_header_t *next = block_next(block);
+	ASAN_UNPOISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 
 	int fl = 0;
 	int sl = 0;
 
 	tlsf_assert(block_is_free(block) && "block should be free");
-	tlsf_assert(!block_is_free(block_next(block)) && "next block should not be free");
-	tlsf_assert(block_size(block_next(block)) == 0 && "next block size should be zero");
+	tlsf_assert(!block_is_free(next) && "next block should not be free");
+	tlsf_assert(block_size(next) == 0 && "next block size should be zero");
 
-	mapping_insert(block_size(block), &fl, &sl);
+	mapping_search(block_size(block), &fl, &sl);
 	remove_free_block(tlsf, block, fl, sl);
+
+	ASAN_UNPOISON_MEMORY_REGION(block_to_ptr(block), block_size(block));
 }
 
 /*
@@ -962,13 +1061,15 @@ tlsf_t *tlsf_create_with_pool(void *mem, size_t bytes)
 
 void tlsf_destroy(tlsf_t *tlsf)
 {
+	ASAN_UNPOISON_MEMORY_REGION(&tlsf->block_null.free_list, sizeof(struct free_list));
+
 	/* Nothing to do */
 	(void)tlsf;
 }
 
-pool_t *tlsf_get_pool(tlsf_t *tlsf)
+tlsf_pool_t *tlsf_get_pool(tlsf_t *tlsf)
 {
-	return tlsf_cast(pool_t *, (char *)tlsf + tlsf_size());
+	return tlsf_cast(tlsf_pool_t *, (char *)tlsf + tlsf_size());
 }
 
 void *tlsf_malloc(tlsf_t *tlsf, size_t size)
@@ -1024,7 +1125,7 @@ void *tlsf_memalign(tlsf_t *tlsf, size_t align, size_t size)
 
 		if (gap > 0) {
 			tlsf_assert(gap >= gap_minimum && "gap size too small");
-			block = block_trim_free_leading(tlsf, block, gap);
+			block_trim_free_leading(tlsf, &block, gap);
 		}
 	}
 
@@ -1036,11 +1137,22 @@ void tlsf_free(tlsf_t *tlsf, void *ptr)
 	/* Don't attempt to free a NULL pointer */
 	if (ptr != NULL) {
 		block_header_t *block = block_from_ptr(ptr);
+		ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+		ASAN_POISON_MEMORY_REGION(ptr, block_size(block));
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
 		block_mark_as_free(block);
-		block = block_merge_prev(tlsf, block);
-		block = block_merge_next(tlsf, block);
+
+		if (tlsf == NULL) {
+			tlsf = block->metadata.tlsf;
+		} else {
+			assert(tlsf == block->metadata.tlsf && "invalid heap");
+		}
+
+		block_merge_prev(tlsf, &block);
+		block_merge_next(tlsf, block);
 		block_insert(tlsf, block);
+		ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+		// ASAN poison data block
 	}
 }
 
@@ -1067,14 +1179,23 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 	}
 	/* Requests with NULL pointers are treated as malloc */
 	else if (ptr == NULL) {
+		tlsf_assert(tlsf != NULL && "realloc with NULL pointer requires heap argument");
 		p = tlsf_malloc(tlsf, size);
 	} else {
 		block_header_t *block = block_from_ptr(ptr);
+		ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 		block_header_t *next = block_next(block);
+		ASAN_UNPOISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 
 		const size_t cursize = block_size(block);
 		const size_t combined = cursize + block_size(next) + metadata_size;
 		const size_t adjust = adjust_request_size(size, ALIGN_SIZE);
+
+		if (tlsf == NULL) {
+			tlsf = block->metadata.tlsf;
+		} else {
+			tlsf_assert(tlsf == block->metadata.tlsf && "invalid heap");
+		}
 
 		tlsf_assert(!block_is_free(block) && "block already marked as free");
 
@@ -1083,6 +1204,9 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 		 * block, does not offer enough space, we must reallocate and copy.
 		 */
 		if (adjust > cursize && (!block_is_free(next) || adjust > combined)) {
+
+			ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
+			ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 			p = tlsf_malloc(tlsf, size);
 			if (p != NULL) {
 				const size_t minsize = tlsf_min(cursize, size);
@@ -1090,15 +1214,23 @@ void *tlsf_realloc(tlsf_t *tlsf, void *ptr, size_t size)
 				tlsf_free(tlsf, ptr);
 			}
 		} else {
+			ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 			/* Do we need to expand to the next block? */
 			if (adjust > cursize) {
 				block_merge_next(tlsf, block);
 				block_mark_as_used(block);
+
+				// Unpoison extra
+				ASAN_UNPOISON_MEMORY_REGION(ptr + cursize, adjust - cursize);
+			} else {
+				// Poison shrinked
+				ASAN_POISON_MEMORY_REGION(ptr + adjust, cursize - adjust);
 			}
 
 			/* Trim the resulting block and return the original pointer */
 			block_trim_used(tlsf, block, adjust);
 			p = ptr;
+			ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 		}
 	}
 
