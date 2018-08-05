@@ -14,6 +14,7 @@ AC_SUBST(TLSF_AGE)
 AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([foreign subdir-objects silent-rules])
 AM_SILENT_RULES([yes])
+AC_USE_SYSTEM_EXTENSIONS
 AC_CONFIG_SRCDIR([tlsf.h])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])

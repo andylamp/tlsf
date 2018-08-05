@@ -103,16 +103,16 @@ size_t def_trail = 10;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;       // min benchmark trials
-size_t bench_trials = 10000000; // benchmark trials
+size_t bench_trials = 100000; // benchmark trials
 
 // file format details
 int line_offset = 2;    // line offset
 
 // trace dump related
-char *dump_dir = "./traces";                    // dump directory
-char *dump_ext = "csv";                         // dump extension
-char *dump_mem_trace_suffix = "mem_trace_out";  // suffix for mem trace
-
+char *dump_dir = "./traces";                            // dump directory
+char *dump_ext = "csv";                                 // dump extension
+char *dump_tlsf_trace_suffix = "tlsf_mem_trace_out";    // tlsf suffix trace 
+char *dump_native_trace_suffix = "native_mem_trace_out";// native suffix trace 
 // tokenizer related
 char *tok_delim_cm = ",";
 char *tok_delim_nl = "\n";
@@ -621,10 +621,16 @@ destroy_tlsf_pool(wtlsf_t *pool) {
 }
 
 /**
+ *
+ * TLSF bench start
+ * 
+ */
+
+/**
  * Execute the sequential plan
  */
 void
-tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a SEQUENTIAL plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
@@ -635,13 +641,21 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
     if(plan->slot_type[i] == SLOT_MALLOC) {
       //printf(" -- Allocating block at %d with size %zu bytes\n", 
       //  i, plan->block_size[i]);
-      plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      if(pool != NULL) {
+        plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);  
+      } else {
+        plan->mem_ptr[mem_pivot] = malloc(plan->block_size[i]);
+      }
       plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
       mem_pivot++;
     } else if(plan->slot_type[i] == SLOT_FREE) {
       int free_blk = (int) plan->block_id[i];
       //printf(" -- Freeing block at %d\n", free_blk);
-      tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      if(pool != NULL) {
+        tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      } else {
+        free(plan->mem_ptr[free_blk]);
+      }
       // explicitly NULL the pointer
       plan->mem_ptr[free_blk] = NULL;
       //plan->cur_malloc_size[free_blk] = 0;
@@ -661,7 +675,7 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute the ramp plan
  */
 void
-tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a RAMP plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
@@ -670,7 +684,7 @@ tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute the hammer plan
  */
 void 
-tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a HAMMER plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
@@ -679,7 +693,7 @@ tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute a scripted custom plan from file import
  */
 void
-tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a CUSTOM plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
@@ -688,12 +702,20 @@ tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
     t_ctx = tic(NULL);
     if(plan->slot_type[i] == SLOT_MALLOC) {
       // allocate the block to the designated slot
-      plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      if(pool != NULL) {
+        plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);        
+      } else {
+        plan->mem_ptr[mem_pivot] = malloc(plan->block_size[i]);
+      }
       plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
       mem_pivot++;
     } else if(plan->slot_type[i] == SLOT_FREE) {
       // free the block
-      tlsf_free(pool->tlsf_ptr, plan->mem_ptr[plan->block_id[i]]);
+      if(pool != NULL) {
+        tlsf_free(pool->tlsf_ptr, plan->mem_ptr[plan->block_id[i]]);
+      } else {
+        free(plan->mem_ptr[plan->block_id[i]]);
+      }
       // explicitly NULL the pointer
       plan->mem_ptr[plan->block_id[i]] = NULL;
     } else {
@@ -708,59 +730,76 @@ tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
 }
 
 /**
- * This function benchmarks tlsf in sequential malloc/frees
+ * This function benchmarks tlsf/native allocator using predefined plans which
+ * are comprised out of malloc/free pairs.
  */
 void
-tlsf_bench(wtlsf_t *pool, alloc_plan_t *plan) {
-  // check if pool is null
-  if(pool == NULL) {
-    printf(" !! Error pool cannot be NULL, cannot continue\n");
-    return;
-  }
+mem_bench(wtlsf_t *pool, alloc_plan_t *plan) {
+  
   // check if plan is null
   if(plan == NULL || plan->peak_alloc == 0 || plan->aggregated_alloc == 0) {
     printf(" !! Error allocation plan cannot be NULL, cannot continue\n");
     return;
   }
-  // check if our provided pool can execute the plan
-  if(plan->peak_alloc > pool->size) {
+
+  // check if pool is null -- we either use native allocator or the tlsf pool
+  if(pool == NULL) {
+    printf(" ** Null pool detected, using native allocator\n");
+  } else if (pool != NULL && plan->peak_alloc > pool->size) {
     printf(" !! Error, pool size of %zu is too small to satisfy peak allocation \
 of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
     return;
   }
+  
   // basic info
-  printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
-    plan->plan_size, pool->size);
+  if(pool != NULL) {
+    printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
+      plan->plan_size, pool->size);
+  } else {
+    printf(" -- Running %zu ops using the native memory allocator\n", 
+      plan->plan_size);
+  }
   unsigned long long ctx = tic(NULL);
   // execute the sequential plan
   switch(plan->type) {
     case ALLOC_SEQ: {
-      tlsf_bench_seq(pool, plan);
+      bench_seq(pool, plan);
       break;
     }
     case ALLOC_RAMP: {
-      tlsf_bench_ramp(pool, plan);
+      bench_ramp(pool, plan);
       break;
     }
     case ALLOC_HAMMER: {
-      tlsf_bench_hammer(pool, plan);
+      bench_hammer(pool, plan);
       break;
     }
     case ALLOC_CUSTOM: {
-      tlsf_bench_custom(pool, plan);
+      bench_custom(pool, plan);
       break;
     }
     default: {
-      tlsf_bench_seq(pool, plan);
+      bench_seq(pool, plan);
       break;
     }
   }
   // find the total elapsed time
-  double elapsed = toc(ctx, NULL, false);
-  printf(" -- Finished %zu ops in pool, elapsed cycles for bench was %f\n", 
-    plan->plan_size, elapsed);
-  printf(" -- xput: %lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
+  long double elapsed = toc(ctx, NULL, false);
+  if(pool != NULL) {
+    printf(" -- Finished %zu ops in pool, elapsed cycles for bench was %Le\n", 
+      plan->plan_size, elapsed);
+  } else {
+    printf(" -- Finished %zu ops, elapsed cycles for bench was %Le\n", 
+      plan->plan_size, elapsed);
+  }
+  printf(" -- xput: %Lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
 }
+
+/**
+ *
+ * TLSF bench end
+ * 
+ */
 
 /**
  * little hack to get the numbers showing with two digits even when it's < 10 which
@@ -1262,11 +1301,9 @@ print_plan(alloc_plan_t *plan) {
  * an existing trace.
  */
 void 
-execute_plan() {
+execute_plan(bool use_native_alloc) {
   // return value
   bool ret = false;
-  // our pool structure
-  wtlsf_t pool = {0};
   // our plan structure
   alloc_plan_t plan = {0};
 
@@ -1286,16 +1323,24 @@ execute_plan() {
   char *tag = "Global Tag";
   unsigned long long c_ctx = tic(tag);
 
-  // create the pool
-  if(create_tlsf_pool(&pool, pool_size) == NULL) {
-    printf(" !! Error, fatal error encountered when creating the pool\n");
-    ret = false;
-  } else {  
-    // now run the bench
-    tlsf_bench(&pool, &plan);
-    // destroy the pool
-    destroy_tlsf_pool(&pool);
+  if(use_native_alloc) {
+    // use the native allocator
+    mem_bench(NULL, &plan);
+  } else {
+    // declare our pool structure
+    wtlsf_t pool = {0};
+    // create the pool
+    if(create_tlsf_pool(&pool, pool_size) == NULL) {
+      printf(" !! Error, fatal error encountered when creating the pool\n");
+      ret = false;
+    } else {  
+      // now run the bench
+      mem_bench(&pool, &plan);
+      // destroy the pool
+      destroy_tlsf_pool(&pool);
+    }
   }
+
 
   // timing point
   toc(c_ctx, tag, true);
@@ -1304,7 +1349,11 @@ execute_plan() {
 
   // dump the plan
   if(dflag && ret) {
-    dump_plan(&plan, dump_mem_trace_suffix); 
+    if(use_native_alloc) {
+      dump_plan(&plan, dump_native_trace_suffix); 
+    } else {
+      dump_plan(&plan, dump_tlsf_trace_suffix); 
+    }
   }
   
   // finally destroy the allocation plan
@@ -1323,9 +1372,9 @@ main(int argc, char **argv) {
   if(!parse_args(argc, argv)) {
     return 0;
   } 
-  
+  bool use_native_alloc = true;
   // execute our plan based on arguments  
-  execute_plan();
+  execute_plan(use_native_alloc);
   
   // finally return
   return 0;
