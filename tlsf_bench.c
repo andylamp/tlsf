@@ -35,6 +35,7 @@
 /* sys includes */
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 /* intrinsics */
 #include <x86intrin.h>
 
@@ -64,6 +65,13 @@ typedef enum _slot_type_t {
   SLOT_FREE = 2,
   /* possibly expand? */
 } slot_type_t;
+
+/* benchmark type */
+typedef enum _bench_type_t {
+  BENCH_TLSF = 1,
+  BENCH_NATIVE = 2,
+  BENCH_BOTH = 3,
+} bench_type_t;
 
 /* allocation plan helper */
 typedef struct _alloc_plan_t {
@@ -111,14 +119,23 @@ size_t bench_trials = 100000; // benchmark trials
 
 // file format details
 int line_offset = 2;    // line offset
+
 // cpu id for affinity set
 int def_cpu_core_id = 0;
+// no of cores
+int core_count = -1;
+// no of available cores
+int core_count_avail = -1;
+
+// benchmark type (default is tlsf only)
+bench_type_t bench_type = BENCH_TLSF;
 
 // trace dump related
 char *dump_dir = "./traces";                            // dump directory
 char *dump_ext = "csv";                                 // dump extension
 char *dump_tlsf_trace_suffix = "tlsf_mem_trace_out";    // tlsf suffix trace 
 char *dump_native_trace_suffix = "native_mem_trace_out";// native suffix trace 
+
 // tokenizer related
 char *tok_delim_cm = ",";
 char *tok_delim_nl = "\n";
@@ -126,10 +143,11 @@ bool parsing_out_traces = false;
 
 // command line argument config
 
+bool bflag = false; // benchmark flag type
+bool cflag = false; // cpu pin flag
+bool dflag = false; // dump flag
 bool pflag = false; // import flag
 bool tflag = false; // custom trial flag
-bool dflag = false; // dump flag
-bool cflag = false; // cpu pin flag
 
 // import plan (-p)
 char *imp_fname = NULL;
@@ -489,11 +507,53 @@ parse_args(int argc, char **argv) {
   // set opterr to 0 for silence
   opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "dct:p:")) != -1) {
+  while((c = getopt(argc, argv, "b:cdp:t:")) != -1) {
     switch(c) {
+      case 'b': {
+        // raise bench flag
+        bflag = true;
+        if(optarg != NULL) {
+          char *endp;
+          int num = (int) strtol(optarg, &endp, 0);
+          switch(num) {
+            case 1: {
+              printf(" ** Benching TLSF allocator only\n");
+              bench_type = BENCH_TLSF;
+              break;
+            }
+            case 2: {
+              printf(" ** Benching NATIVE allocator only\n");
+              bench_type = BENCH_NATIVE;
+              break;
+            }
+            case 3: {
+              printf(" ** Benching TLSF & NATIVE allocators\n");
+              bench_type = BENCH_BOTH;
+              break;
+            }
+            default: {
+              printf(" !! Error could not parse valid bench flag using default\n");
+              break;
+
+            }
+          }
+        }
+        break;
+      }
       case 'c': {
         // raise the affinity flag
         cflag = true;
+        if(optarg != NULL) {
+          char *endp;
+          int num = (int) strtol(optarg, &endp, 0);
+          if(num < 0 || num >= core_count_avail) {
+            printf(" !! Error core id given (%d) larger than allowed (%d)\n", 
+              core_count_avail-1, num);
+          } else {
+            printf(" ** Valid affinity id (%d) provided, setting\n", num);
+            def_cpu_core_id = num;
+          }
+        }
         break;
       }      
       // dump the allocation plan to a trace file
@@ -504,7 +564,7 @@ parse_args(int argc, char **argv) {
       }      
       // parse custom plan from file, if supplied
       case 'p': {
-        // raise p flag
+        // raise the custom plan flag
         pflag = true;
         // set the filename
         imp_fname = optarg;
@@ -856,7 +916,7 @@ create_iso8061_ts(char *dir, char *suffix, char* ext) {
   }
 
   // perform the conversion
-  num_to_str_pad(tm_mon_buf, mytime->tm_mon);
+  num_to_str_pad(tm_mon_buf, mytime->tm_mon+1); // offset month, due to range [0,11]
   num_to_str_pad(tm_mday_buf, mytime->tm_mday);
   num_to_str_pad(tm_hour_buf, mytime->tm_hour);
   num_to_str_pad(tm_min_buf, mytime->tm_min);
@@ -1315,6 +1375,9 @@ print_plan(alloc_plan_t *plan) {
  */
 void 
 execute_plan(bool use_native_alloc) {
+  // start hint
+  printf("\n ## Executing plan using %s allocator\n", 
+    use_native_alloc ? "native" : "tlsf");
   // return value
   bool ret = false;
   // our plan structure
@@ -1371,6 +1434,9 @@ execute_plan(bool use_native_alloc) {
   
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
+  // finish hint
+  printf(" ## Finished executing plan using %s allocator\n\n", 
+    use_native_alloc ? "native" : "tlsf");
 }
 
 /**
@@ -1401,25 +1467,83 @@ bool cpu_pin(int core_id) {
 }
 
 /**
+ * Enumerate available cores
+ */
+void
+enum_cpu_cores() {
+  core_count = get_nprocs_conf(); 
+  core_count_avail = get_nprocs();
+  printf(" ** Detected %d number of cores out of which usable are: %d\n", 
+    core_count, core_count_avail);
+}
+
+/**
+ * Stub to run our benchmark types (tlsf, native, or both)
+ */
+void
+run_bench() {
+  // handle affinity, if enabled
+  if(cflag) {
+    cpu_pin(def_cpu_core_id);
+  } else {
+    printf(" ** Using OS scheduled core affinity\n");
+  }
+  // benchmark type to run, currently we have three types
+  // tlsf, native, or both.
+  switch(bench_type) {
+    case BENCH_TLSF: {
+      // use tlsf allocator
+      execute_plan(false);
+      break;
+    }
+    case BENCH_NATIVE: {
+      // use native allocator
+      execute_plan(true);
+      break;
+    }
+    case BENCH_BOTH: {
+      // use native allocator
+      execute_plan(true);
+      // use tlsf allocator
+      execute_plan(false);
+      break;
+    }
+    default: {
+      // use tlsf allocator
+      execute_plan(false);
+      break;
+    }
+  }
+}
+
+/**
+ * Handle general initialization stuff.
+ */
+bool
+boostrap(int argc, char **argv) {
+  printf("\n");
+  // initialize the random number generator
+  srand(2);
+  // set the amount of cpu cores
+  enum_cpu_cores();
+  // parse arguments
+  if(!parse_args(argc, argv)) {
+    return false;
+  } 
+  return true;
+}
+
+/**
  * Main stub
  */
 int
 main(int argc, char **argv) {
-  printf("\n");
-  // initialize the random number generator
-  srand(2);
-  // parse arguments
-  if(!parse_args(argc, argv)) {
-    return 0;
-  } 
+  if(!boostrap(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  // run our benchmark
+  run_bench();
 
-  // handle affinity
-  cpu_pin(def_cpu_core_id);
-
-  bool use_native_alloc = true;
-  // execute our plan based on arguments  
-  execute_plan(use_native_alloc);
-
-  // finally return
-  return 0;
+  // finally, return
+  return EXIT_SUCCESS;
 }
