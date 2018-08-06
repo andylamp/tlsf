@@ -16,6 +16,9 @@
  * Includes
  */
 
+/* define extensions */
+#define _GNU_SOURCE
+
 /* standard libraries */
 #include <unistd.h>
 #include <time.h>
@@ -28,6 +31,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 /* sys includes */
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -107,6 +111,8 @@ size_t bench_trials = 100000; // benchmark trials
 
 // file format details
 int line_offset = 2;    // line offset
+// cpu id for affinity set
+int def_cpu_core_id = 0;
 
 // trace dump related
 char *dump_dir = "./traces";                            // dump directory
@@ -123,6 +129,7 @@ bool parsing_out_traces = false;
 bool pflag = false; // import flag
 bool tflag = false; // custom trial flag
 bool dflag = false; // dump flag
+bool cflag = false; // cpu pin flag
 
 // import plan (-p)
 char *imp_fname = NULL;
@@ -482,8 +489,27 @@ parse_args(int argc, char **argv) {
   // set opterr to 0 for silence
   opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "dt:p:")) != -1) {
+  while((c = getopt(argc, argv, "dct:p:")) != -1) {
     switch(c) {
+      case 'c': {
+        // raise the affinity flag
+        cflag = true;
+        break;
+      }      
+      // dump the allocation plan to a trace file
+      case 'd': {
+        // raise the dump flag
+        dflag = true;
+        break;
+      }      
+      // parse custom plan from file, if supplied
+      case 'p': {
+        // raise p flag
+        pflag = true;
+        // set the filename
+        imp_fname = optarg;
+        break;
+      }
       // parse plan size, if supplied
       case 't': {
         // raise t flag
@@ -503,28 +529,15 @@ parse_args(int argc, char **argv) {
         }
         break;
       }
-      // parse custom plan from file, if supplied
-      case 'p': {
-        // raise p flag
-        pflag = true;
-        // set the filename
-        imp_fname = optarg;
-        break;
-      }
-      // dump the allocation plan to a trace file
-      case 'd': {
-        // raise the dump flag
-        dflag = true;
-        break;
-      }
+
       // handle arguments that require a parameter
       case '?': {
         printf(" !! Error: argument -%c, requires an parameter\n", optopt);
-        printf("\n    Usage: ./tlsfbench -d ((-t ops) | (-p infile)) \n");
+        printf("\n    Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
         return false;
       }
       default: {
-        printf("   Usage: ./tlsfbench -d ((-t ops) | (-p infile)) \n");
+        printf("   Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
         return false;
         break;
       }
@@ -1361,6 +1374,33 @@ execute_plan(bool use_native_alloc) {
 }
 
 /**
+ * Function that pins the current thread to a certain CPU id as 
+ * defined by `core_id`
+ * @param  core_id cpu id to pin
+ * @return         true if successful, false otherwise
+ */
+bool cpu_pin(int core_id) {
+  int ret = 0;
+  pthread_t tid;
+  cpu_set_t cpu_set;
+  // initialize the pthread to be self
+  tid = pthread_self();
+  // zero out the affinity mask
+  CPU_ZERO(&cpu_set);
+  // set the process affinity to be on core_id
+  CPU_SET(core_id, &cpu_set);
+  // try to set the affinity of the thread
+  ret = pthread_setaffinity_np(tid, sizeof(cpu_set_t), &cpu_set);
+  // check the result
+  if(ret != 0) {
+    printf("Could not set affinity on requested core id (%d)\n", core_id);
+  } else {
+    printf("Affinity set successful to use only core with id: %d\n", core_id);
+  }
+  return ret != 0;
+}
+
+/**
  * Main stub
  */
 int
@@ -1372,10 +1412,14 @@ main(int argc, char **argv) {
   if(!parse_args(argc, argv)) {
     return 0;
   } 
+
+  // handle affinity
+  cpu_pin(def_cpu_core_id);
+
   bool use_native_alloc = true;
   // execute our plan based on arguments  
   execute_plan(use_native_alloc);
-  
+
   // finally return
   return 0;
 }
