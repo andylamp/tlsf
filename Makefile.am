@@ -20,4 +20,4 @@ example_SOURCES = example.c $(HEADERS)
 example_LDADD = $(top_builddir)/libnio-tlsf.la
 
 tlsfbench_SOURCES = tlsf_bench.c $(HEADERS)
-tlsfbench_LDADD = $(top_builddir)/libnio-tlsf.la
+tlsfbench_LDADD = $(top_builddir)/libnio-tlsf.la -lpthread
