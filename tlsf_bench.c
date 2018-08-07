@@ -115,7 +115,7 @@ size_t def_trail = 10;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;       // min benchmark trials
-size_t bench_trials = 100000; // benchmark trials
+size_t bench_trials = 10000000; // benchmark trials
 
 // file format details
 int line_offset = 2;    // line offset
@@ -168,7 +168,7 @@ tic(char *msg) {
 }
 
 /**
- * tock: function that takes a timing context and
+ * toc: function that takes a timing context and
  * returns the difference as a double.
  */
 double
@@ -182,7 +182,27 @@ toc(unsigned long long start, char *msg, bool print) {
       printf(" ** Toc: Elapsed time %llu cycles\n", diff);
     }
   }
+  // returns *cycles*
   return diff;
+}
+
+/**
+ * toc_s: a less granular function that takes a timing 
+ * context and returns the difference as a double.
+ */
+clock_t
+tic_s(char *msg) {
+  if(msg != NULL) {
+    printf(" ** Tick (%s)\n", msg);
+  }
+  // returns *time*
+  return clock();
+}
+
+double
+toc_s(clock_t start, char *msg, bool print) {
+  clock_t end = clock();
+  return (double) end - start;
 }
 
 /**
@@ -505,6 +525,7 @@ destroy_alloc_plan(alloc_plan_t *plan) {
 bool
 parse_args(int argc, char **argv) {
   // set opterr to 0 for silence
+  bool ret = true;
   opterr = 0;
   int c;
   while((c = getopt(argc, argv, "b:c:dp:t:")) != -1) {
@@ -534,7 +555,6 @@ parse_args(int argc, char **argv) {
             default: {
               printf(" !! Error could not parse valid bench flag using default\n");
               break;
-
             }
           }
         }
@@ -545,13 +565,19 @@ parse_args(int argc, char **argv) {
         cflag = true;
         if(optarg != NULL) {
           char *endp;
+          errno = 0;
           int num = (int) strtol(optarg, &endp, 0);
-          if(num < 0 || num >= core_count_avail) {
+          if(num == 0) {
+            printf(" !! Error could not convert given value to allowed range: [1, %d]\n",
+              core_count_avail);
+            ret = false;
+          } else if(num < 0 || num >= core_count_avail) {
             printf(" !! Error core id given (%d) larger than allowed (%d)\n", 
-              num, core_count_avail-1);
+              num, core_count_avail);
+            ret = false;
           } else {
-            printf(" ** Valid affinity id (%d) provided, setting\n", num);
-            def_cpu_core_id = num;
+            printf(" ** Valid affinity core id (%d) provided, setting\n", num);
+            def_cpu_core_id = num-1;
           }
         }
         break;
@@ -567,25 +593,39 @@ parse_args(int argc, char **argv) {
         // raise the custom plan flag
         pflag = true;
         // set the filename
-        imp_fname = optarg;
+        if(optarg == NULL) {
+          printf(" !! Error, p flag requires a plan trace file as an argument\n");
+          ret = false;
+        } else {
+          imp_fname = optarg;
+        }
         break;
       }
       // parse plan size, if supplied
       case 't': {
         // raise t flag
         tflag = true;
-        char *endp;
-        long t_trials = strtol(optarg, &endp, 0);
-        if(optarg != endp && *endp == '\0') {
-          if(t_trials < min_trials) {
-            printf(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
-              t_trials, min_trials);
-          } else {
-            printf(" ** Trials set to %zu\n", t_trials);
-            bench_trials = (size_t) t_trials;
-          }
+        if(optarg == NULL) {
+          printf(" !! Error, t requires an argument > 0\n");
+          ret = false;
         } else {
-          printf(" !! Error: Invalid argument supplied, reverting to default\n");
+          char *endp;
+          long t_trials = strtol(optarg, &endp, 0);
+          if(t_trials == 0) {
+            printf(" !! Error, could not parse the suppled -t argument\n");
+            ret = false;
+          } else if(optarg != endp && *endp == '\0') {
+            if(t_trials < min_trials) {
+              printf(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
+                t_trials, min_trials);
+            } else {
+              printf(" ** Trials set to %zu\n", t_trials);
+              bench_trials = (size_t) t_trials;
+            }
+          } else {
+            printf(" !! Error: Invalid argument supplied, reverting to default\n");
+            ret = false;
+          }
         }
         break;
       }
@@ -594,11 +634,11 @@ parse_args(int argc, char **argv) {
       case '?': {
         printf(" !! Error: argument -%c, requires an parameter\n", optopt);
         printf("\n    Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
-        return false;
+        ret = false;
       }
       default: {
         printf("   Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
-        return false;
+        ret = false;
         break;
       }
     }
@@ -606,9 +646,9 @@ parse_args(int argc, char **argv) {
   // check for concurrent flags
   if(pflag && tflag) {
     printf(" !! Error: cannot have both -p and -t at the same time\n");
-    return false;
+    ret = false;
   }
-  return true;
+  return ret;
 }
 
 /**
@@ -625,7 +665,7 @@ alloc_mem(size_t size) {
     printf(" !! Requested memory failed to yield, aborting\n");
     return NULL;
   } else {
-    printf(" -- Ghostly allocated memory of size: %zu\n", size);
+    printf(" -- Ghostly allocated memory of size: %zu bytes\n", size);
   }
   printf(" -- Warming up memory...\n");
   // forcefully request memory
@@ -634,7 +674,7 @@ alloc_mem(size_t size) {
     *mem_addr = 0;
     mem_addr++;
   }
-  printf(" -- Returning warmed-up memory of size: %zu\n", size);
+  printf(" -- Returning warmed-up memory of size: %zu bytes\n", size);
   return mem;
 }
 
@@ -1379,7 +1419,7 @@ execute_plan(bool use_native_alloc) {
   printf("\n ## Executing plan using %s allocator\n", 
     use_native_alloc ? "native" : "tlsf");
   // return value
-  bool ret = false;
+  bool ret = true;
   // our plan structure
   alloc_plan_t plan = {0};
 
@@ -1459,9 +1499,11 @@ bool cpu_pin(int core_id) {
   ret = pthread_setaffinity_np(tid, sizeof(cpu_set_t), &cpu_set);
   // check the result
   if(ret != 0) {
-    printf("Could not set affinity on requested core id (%d)\n", core_id);
+    printf(" !! Error, could not set affinity on requested internal core id (%d)\n", 
+      core_id);
   } else {
-    printf("Affinity set successful to use only core with id: %d\n", core_id);
+    printf(" ** Affinity set successful; using core with internal id: %d\n", 
+      core_id);
   }
   return ret != 0;
 }
@@ -1488,6 +1530,7 @@ run_bench() {
   } else {
     printf(" ** Using OS scheduled core affinity\n");
   }
+
   // benchmark type to run, currently we have three types
   // tlsf, native, or both.
   switch(bench_type) {
@@ -1530,6 +1573,8 @@ boostrap(int argc, char **argv) {
   if(!parse_args(argc, argv)) {
     return false;
   } 
+  // notify of dump flag
+  printf(" ** Dumping traces is: %s\n", dflag ? "ENABLED" : "DISABLED");
   return true;
 }
 
