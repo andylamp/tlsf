@@ -507,7 +507,7 @@ parse_args(int argc, char **argv) {
   // set opterr to 0 for silence
   opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "b:cdp:t:")) != -1) {
+  while((c = getopt(argc, argv, "b:c:dp:t:")) != -1) {
     switch(c) {
       case 'b': {
         // raise bench flag
@@ -548,7 +548,7 @@ parse_args(int argc, char **argv) {
           int num = (int) strtol(optarg, &endp, 0);
           if(num < 0 || num >= core_count_avail) {
             printf(" !! Error core id given (%d) larger than allowed (%d)\n", 
-              core_count_avail-1, num);
+              num, core_count_avail-1);
           } else {
             printf(" ** Valid affinity id (%d) provided, setting\n", num);
             def_cpu_core_id = num;
