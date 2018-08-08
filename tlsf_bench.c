@@ -588,7 +588,7 @@ parse_args(int argc, char **argv) {
               num, core_count_avail);
             ret = false;
           } else {
-            printf(" ** Valid affinity core id (%d) provided, setting\n", num);
+            printf(" ** Valid affinity core id (%d) parsed, will try to set\n", num);
             def_cpu_core_id = num-1;
           }
         }
@@ -1512,11 +1512,11 @@ bool cpu_pin(int core_id) {
   ret = pthread_setaffinity_np(tid, sizeof(cpu_set_t), &cpu_set);
   // check the result
   if(ret != 0) {
-    printf(" !! Error, could not set affinity on requested internal core id (%d)\n", 
-      core_id);
+    printf(" !! Error, could not set affinity on core %d with internal id: %d\n", 
+      core_id+1, core_id);
   } else {
-    printf(" ** Affinity set successful; using core with internal id: %d\n", 
-      core_id);
+    printf(" ** Affinity set successful; using core %d with internal id: %d\n", 
+      core_id+1, core_id);
   }
   return ret != 0;
 }
