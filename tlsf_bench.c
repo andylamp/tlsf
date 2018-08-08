@@ -103,7 +103,8 @@ const size_t mb_div = (1024*1024); // divider from Bytes to MB
 
 // pool config
 size_t min_block_size = 8192;   // default 8kb (2^13) 
-size_t pool_size = 2147483648;  // default 2GB (2^31)
+//size_t pool_size = 2147483648;  // default 2GB (2^31)
+size_t pool_size = 4294967296;  // default 4GB (2^32)
 size_t min_pool_size = 102400;  // default is 100Mb
 
 // request block size range
@@ -111,7 +112,7 @@ size_t blk_mul_min = 1;             // min multiplier
 size_t blk_mul_max = 6400;          // max multiplier
 
 // allocation configuration
-size_t def_trail = 10;          // default trail size
+size_t def_trail = 80;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;        // min benchmark trials
