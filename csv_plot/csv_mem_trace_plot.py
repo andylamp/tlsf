@@ -47,9 +47,9 @@ def parse_file(f):
         print("Total spikes: {} out of {} ops".format(malloc_spikes + free_spikes, total_ops))
         print("Total malloc spikes: {} out of {} ops".format(malloc_spikes, len(malloc_len)))
         print("Total free spikes: {} out of {} ops".format(free_spikes, len(free_len)))
-        print("Total spike %: {} %".format((1.0 * malloc_spikes + free_spikes) / total_ops))
-        print("Total malloc spike %: {} %".format((1.0 * malloc_spikes) / len(malloc_len)))
-        print("Total free spike %: {} %".format((1.0 * free_spikes) / len(free_len)))
+        print("Total spike %: {} %".format((100.0 * (malloc_spikes + free_spikes)) / total_ops))
+        print("Total malloc spike %: {} %".format((100.0 * malloc_spikes) / len(malloc_len)))
+        print("Total free spike %: {} %".format((100.0 * free_spikes) / len(free_len)))
 
 
 def plot_hist2d(fname, title_tag, data_a, data_b, bins):
@@ -68,7 +68,7 @@ def plot_hist2d(fname, title_tag, data_a, data_b, bins):
     plt.colorbar()
     plt.ylabel("Block size (MB)")
     plt.xlabel("Cycles spent")
-    plt.title(title_tag)
+    plt.title(str(len(data_b))+" "+title_tag)
     plt.show()
     fpath = fname + "_chunk_vs_cycles" + ".pdf"
     if isfile(fpath):
@@ -93,7 +93,7 @@ def plot_hist_comb(fname, data_a, data_b, bin_no):
     bin_step = roundup(max_val / bin_no, 100)
     bins = np.arange(0, max_val, bin_step)
 
-    hist_fig, ax = plt.subplots(figsize=(9, 5))
+    hist_fig, ax = plt.subplots(figsize=(18, 5))
     _, bins, patches = plt.hist([np.clip(data_a, bins[0], bins[-1]),
                                  np.clip(data_b, bins[0], bins[-1])],
                                 density=True,
@@ -111,7 +111,7 @@ def plot_hist_comb(fname, data_a, data_b, bin_no):
 
     plt.yticks([])
     plt.ylabel("density")
-    plt.title('')
+    plt.title("cpu cycles for total ops: " + str(len(data_a)+len(data_b)))
     plt.setp(patches, linewidth=0)
     plt.legend(loc='upper right')
 
