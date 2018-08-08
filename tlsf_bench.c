@@ -114,8 +114,8 @@ size_t blk_mul_max = 6400;          // max multiplier
 size_t def_trail = 10;          // default trail size
 
 // bench config (or 100000000)
-size_t min_trials = 1000;       // min benchmark trials
-size_t bench_trials = 10000000; // benchmark trials
+size_t min_trials = 1000;        // min benchmark trials
+size_t bench_trials = 100000000; // benchmark trials
 
 // file format details
 int line_offset = 2;    // line offset
@@ -162,7 +162,7 @@ char *imp_fname = NULL;
 unsigned long long
 tic(char *msg) {
   if(msg != NULL) {
-    printf(" ** Tick (%s)\n", msg);
+    printf(" ** tick (%s)\n", msg);
   }
   return __builtin_ia32_rdtsc();
 }
@@ -177,9 +177,9 @@ toc(unsigned long long start, char *msg, bool print) {
   unsigned long long diff = ((end - start)); /// CLOCKS_PER_SEC;
   if(print) {
     if(msg) {
-      printf(" ** Toc (%s): Elapsed time %llu cycles\n", msg, diff);
+      printf(" ** toc (%s): Elapsed time %llu cycles\n", msg, diff);
     } else {
-      printf(" ** Toc: Elapsed time %llu cycles\n", diff);
+      printf(" ** toc: Elapsed time %llu cycles\n", diff);
     }
   }
   // returns *cycles*
@@ -187,22 +187,34 @@ toc(unsigned long long start, char *msg, bool print) {
 }
 
 /**
- * toc_s: a less granular function that takes a timing 
- * context and returns the difference as a double.
+ * tic_s: a less granular function that initiates a timing 
+ * context and returns it.
  */
 clock_t
 tic_s(char *msg) {
   if(msg != NULL) {
-    printf(" ** Tick (%s)\n", msg);
+    printf(" ** tick_s (%s)\n", msg);
   }
   // returns *time*
   return clock();
 }
 
+/**
+ * toc_s; is a less granular timing function that takes a timing 
+ * context and returns the difference as a double.
+ */
 double
 toc_s(clock_t start, char *msg, bool print) {
   clock_t end = clock();
-  return (double) end - start;
+  double diff = ((double) end - start) / CLOCKS_PER_SEC;
+  if(print) {
+    if(msg) {
+      printf(" ** toc_s (%s): Elapsed time %lf seconds\n", msg, diff);
+    } else {
+      printf(" ** toc_s: Elapsed time %lf seconds\n", diff);
+    }
+  }
+  return diff;
 }
 
 /**
@@ -1436,8 +1448,10 @@ execute_plan(bool use_native_alloc) {
   }
 
   // now run the experiment
-  char *tag = "Global Tag";
-  unsigned long long c_ctx = tic(tag);
+  char *ctag = "Global Tag cycles";
+  char *stag = "Timer tag";
+  clock_t s_ctx = tic_s(stag);
+  unsigned long long c_ctx = tic(ctag);
 
   if(use_native_alloc) {
     // use the native allocator
@@ -1457,10 +1471,9 @@ execute_plan(bool use_native_alloc) {
     }
   }
 
-
   // timing point
-  toc(c_ctx, tag, true);
-  
+  toc(c_ctx, ctag, true);
+  toc_s(s_ctx, stag, true);
   //print_plan(&plan);
 
   // dump the plan
