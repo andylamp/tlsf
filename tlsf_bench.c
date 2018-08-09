@@ -16,6 +16,9 @@
  * Includes
  */
 
+/* define extensions */
+#define _GNU_SOURCE
+
 /* standard libraries */
 #include <unistd.h>
 #include <time.h>
@@ -28,9 +31,11 @@
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 /* sys includes */
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 /* intrinsics */
 #include <x86intrin.h>
 
@@ -60,6 +65,13 @@ typedef enum _slot_type_t {
   SLOT_FREE = 2,
   /* possibly expand? */
 } slot_type_t;
+
+/* benchmark type */
+typedef enum _bench_type_t {
+  BENCH_TLSF = 1,
+  BENCH_NATIVE = 2,
+  BENCH_BOTH = 3,
+} bench_type_t;
 
 /* allocation plan helper */
 typedef struct _alloc_plan_t {
@@ -91,7 +103,8 @@ const size_t mb_div = (1024*1024); // divider from Bytes to MB
 
 // pool config
 size_t min_block_size = 8192;   // default 8kb (2^13) 
-size_t pool_size = 2147483648;  // default 2GB (2^31)
+//size_t pool_size = 2147483648;  // default 2GB (2^31)
+size_t pool_size = 4294967296;  // default 4GB (2^32)
 size_t min_pool_size = 102400;  // default is 100Mb
 
 // request block size range
@@ -99,19 +112,30 @@ size_t blk_mul_min = 1;             // min multiplier
 size_t blk_mul_max = 6400;          // max multiplier
 
 // allocation configuration
-size_t def_trail = 10;          // default trail size
+size_t def_trail = 80;          // default trail size
 
 // bench config (or 100000000)
-size_t min_trials = 1000;       // min benchmark trials
-size_t bench_trials = 10000000; // benchmark trials
+size_t min_trials = 1000;        // min benchmark trials
+size_t bench_trials = 100000000; // benchmark trials
 
 // file format details
 int line_offset = 2;    // line offset
 
+// cpu id for affinity set
+int def_cpu_core_id = 0;
+// no of cores
+int core_count = -1;
+// no of available cores
+int core_count_avail = -1;
+
+// benchmark type (default is tlsf only)
+bench_type_t bench_type = BENCH_TLSF;
+
 // trace dump related
-char *dump_dir = "./traces";                    // dump directory
-char *dump_ext = "csv";                         // dump extension
-char *dump_mem_trace_suffix = "mem_trace_out";  // suffix for mem trace
+char *dump_dir = "./traces";                            // dump directory
+char *dump_ext = "csv";                                 // dump extension
+char *dump_tlsf_trace_suffix = "tlsf_mem_trace_out";    // tlsf suffix trace 
+char *dump_native_trace_suffix = "native_mem_trace_out";// native suffix trace 
 
 // tokenizer related
 char *tok_delim_cm = ",";
@@ -120,9 +144,11 @@ bool parsing_out_traces = false;
 
 // command line argument config
 
+bool bflag = false; // benchmark flag type
+bool cflag = false; // cpu pin flag
+bool dflag = false; // dump flag
 bool pflag = false; // import flag
 bool tflag = false; // custom trial flag
-bool dflag = false; // dump flag
 
 // import plan (-p)
 char *imp_fname = NULL;
@@ -137,13 +163,13 @@ char *imp_fname = NULL;
 unsigned long long
 tic(char *msg) {
   if(msg != NULL) {
-    printf(" ** Tick (%s)\n", msg);
+    printf(" ** tick (%s)\n", msg);
   }
   return __builtin_ia32_rdtsc();
 }
 
 /**
- * tock: function that takes a timing context and
+ * toc: function that takes a timing context and
  * returns the difference as a double.
  */
 double
@@ -152,9 +178,41 @@ toc(unsigned long long start, char *msg, bool print) {
   unsigned long long diff = ((end - start)); /// CLOCKS_PER_SEC;
   if(print) {
     if(msg) {
-      printf(" ** Toc (%s): Elapsed time %llu cycles\n", msg, diff);
+      printf(" ** toc (%s): Elapsed time %llu cycles\n", msg, diff);
     } else {
-      printf(" ** Toc: Elapsed time %llu cycles\n", diff);
+      printf(" ** toc: Elapsed time %llu cycles\n", diff);
+    }
+  }
+  // returns *cycles*
+  return diff;
+}
+
+/**
+ * tic_s: a less granular function that initiates a timing 
+ * context and returns it.
+ */
+clock_t
+tic_s(char *msg) {
+  if(msg != NULL) {
+    printf(" ** tick_s (%s)\n", msg);
+  }
+  // returns *time*
+  return clock();
+}
+
+/**
+ * toc_s; is a less granular timing function that takes a timing 
+ * context and returns the difference as a double.
+ */
+double
+toc_s(clock_t start, char *msg, bool print) {
+  clock_t end = clock();
+  double diff = ((double) end - start) / CLOCKS_PER_SEC;
+  if(print) {
+    if(msg) {
+      printf(" ** toc_s (%s): Elapsed time %lf seconds\n", msg, diff);
+    } else {
+      printf(" ** toc_s: Elapsed time %lf seconds\n", diff);
     }
   }
   return diff;
@@ -480,52 +538,120 @@ destroy_alloc_plan(alloc_plan_t *plan) {
 bool
 parse_args(int argc, char **argv) {
   // set opterr to 0 for silence
+  bool ret = true;
   opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "dt:p:")) != -1) {
+  while((c = getopt(argc, argv, "b:c:dp:t:")) != -1) {
     switch(c) {
-      // parse plan size, if supplied
-      case 't': {
-        // raise t flag
-        tflag = true;
-        char *endp;
-        long t_trials = strtol(optarg, &endp, 0);
-        if(optarg != endp && *endp == '\0') {
-          if(t_trials < min_trials) {
-            printf(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
-              t_trials, min_trials);
-          } else {
-            printf(" ** Trials set to %zu\n", t_trials);
-            bench_trials = (size_t) t_trials;
+      case 'b': {
+        // raise bench flag
+        bflag = true;
+        if(optarg != NULL) {
+          char *endp;
+          int num = (int) strtol(optarg, &endp, 0);
+          switch(num) {
+            case 1: {
+              printf(" ** Benching TLSF allocator only\n");
+              bench_type = BENCH_TLSF;
+              break;
+            }
+            case 2: {
+              printf(" ** Benching NATIVE allocator only\n");
+              bench_type = BENCH_NATIVE;
+              break;
+            }
+            case 3: {
+              printf(" ** Benching TLSF & NATIVE allocators\n");
+              bench_type = BENCH_BOTH;
+              break;
+            }
+            default: {
+              printf(" !! Error could not parse valid bench flag using default\n");
+              break;
+            }
           }
-        } else {
-          printf(" !! Error: Invalid argument supplied, reverting to default\n");
         }
         break;
       }
-      // parse custom plan from file, if supplied
-      case 'p': {
-        // raise p flag
-        pflag = true;
-        // set the filename
-        imp_fname = optarg;
+      case 'c': {
+        // raise the affinity flag
+        cflag = true;
+        if(optarg != NULL) {
+          char *endp;
+          errno = 0;
+          int num = (int) strtol(optarg, &endp, 0);
+          if(num == 0) {
+            printf(" !! Error could not convert given value to allowed range: [1, %d]\n",
+              core_count_avail);
+            ret = false;
+          } else if(num < 0 || num >= core_count_avail) {
+            printf(" !! Error core id given (%d) larger than allowed (%d)\n", 
+              num, core_count_avail);
+            ret = false;
+          } else {
+            printf(" ** Valid affinity core id (%d) parsed, will try to set\n", num);
+            def_cpu_core_id = num-1;
+          }
+        }
         break;
-      }
+      }      
       // dump the allocation plan to a trace file
       case 'd': {
         // raise the dump flag
         dflag = true;
         break;
+      }      
+      // parse custom plan from file, if supplied
+      case 'p': {
+        // raise the custom plan flag
+        pflag = true;
+        // set the filename
+        if(optarg == NULL) {
+          printf(" !! Error, p flag requires a plan trace file as an argument\n");
+          ret = false;
+        } else {
+          imp_fname = optarg;
+        }
+        break;
       }
+      // parse plan size, if supplied
+      case 't': {
+        // raise t flag
+        tflag = true;
+        if(optarg == NULL) {
+          printf(" !! Error, t requires an argument > 0\n");
+          ret = false;
+        } else {
+          char *endp;
+          long t_trials = strtol(optarg, &endp, 0);
+          if(t_trials == 0) {
+            printf(" !! Error, could not parse the suppled -t argument\n");
+            ret = false;
+          } else if(optarg != endp && *endp == '\0') {
+            if(t_trials < min_trials) {
+              printf(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
+                t_trials, min_trials);
+            } else {
+              printf(" ** Trials set to %zu\n", t_trials);
+              bench_trials = (size_t) t_trials;
+            }
+          } else {
+            printf(" !! Error: Invalid argument supplied, reverting to default\n");
+            ret = false;
+          }
+        }
+        break;
+      }
+
       // handle arguments that require a parameter
       case '?': {
         printf(" !! Error: argument -%c, requires an parameter\n", optopt);
-        printf("\n    Usage: ./tlsfbench -d ((-t ops) | (-p infile)) \n");
-        return false;
+        printf("\n    Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
+        ret = false;
       }
       default: {
-        printf("   Usage: ./tlsfbench -d ((-t ops) | (-p infile)) \n");
-        return false;
+        printf("   Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
+        ret = false;
         break;
       }
     }
@@ -533,9 +659,9 @@ parse_args(int argc, char **argv) {
   // check for concurrent flags
   if(pflag && tflag) {
     printf(" !! Error: cannot have both -p and -t at the same time\n");
-    return false;
+    ret = false;
   }
-  return true;
+  return ret;
 }
 
 /**
@@ -552,7 +678,7 @@ alloc_mem(size_t size) {
     printf(" !! Requested memory failed to yield, aborting\n");
     return NULL;
   } else {
-    printf(" -- Ghostly allocated memory of size: %zu\n", size);
+    printf(" -- Ghostly allocated memory of size: %zu bytes\n", size);
   }
   printf(" -- Warming up memory...\n");
   // forcefully request memory
@@ -561,7 +687,7 @@ alloc_mem(size_t size) {
     *mem_addr = 0;
     mem_addr++;
   }
-  printf(" -- Returning warmed-up memory of size: %zu\n", size);
+  printf(" -- Returning warmed-up memory of size: %zu bytes\n", size);
   return mem;
 }
 
@@ -621,10 +747,16 @@ destroy_tlsf_pool(wtlsf_t *pool) {
 }
 
 /**
+ *
+ * TLSF bench start
+ * 
+ */
+
+/**
  * Execute the sequential plan
  */
 void
-tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a SEQUENTIAL plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
@@ -635,13 +767,21 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
     if(plan->slot_type[i] == SLOT_MALLOC) {
       //printf(" -- Allocating block at %d with size %zu bytes\n", 
       //  i, plan->block_size[i]);
-      plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      if(pool != NULL) {
+        plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);  
+      } else {
+        plan->mem_ptr[mem_pivot] = malloc(plan->block_size[i]);
+      }
       plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
       mem_pivot++;
     } else if(plan->slot_type[i] == SLOT_FREE) {
       int free_blk = (int) plan->block_id[i];
       //printf(" -- Freeing block at %d\n", free_blk);
-      tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      if(pool != NULL) {
+        tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      } else {
+        free(plan->mem_ptr[free_blk]);
+      }
       // explicitly NULL the pointer
       plan->mem_ptr[free_blk] = NULL;
       //plan->cur_malloc_size[free_blk] = 0;
@@ -661,7 +801,7 @@ tlsf_bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute the ramp plan
  */
 void
-tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a RAMP plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
@@ -670,7 +810,7 @@ tlsf_bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute the hammer plan
  */
 void 
-tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a HAMMER plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
@@ -679,7 +819,7 @@ tlsf_bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute a scripted custom plan from file import
  */
 void
-tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
   printf(" !! Running a CUSTOM plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
@@ -688,12 +828,20 @@ tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
     t_ctx = tic(NULL);
     if(plan->slot_type[i] == SLOT_MALLOC) {
       // allocate the block to the designated slot
-      plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);
+      if(pool != NULL) {
+        plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);        
+      } else {
+        plan->mem_ptr[mem_pivot] = malloc(plan->block_size[i]);
+      }
       plan->cur_malloc_size[mem_pivot] = plan->block_size[i];
       mem_pivot++;
     } else if(plan->slot_type[i] == SLOT_FREE) {
       // free the block
-      tlsf_free(pool->tlsf_ptr, plan->mem_ptr[plan->block_id[i]]);
+      if(pool != NULL) {
+        tlsf_free(pool->tlsf_ptr, plan->mem_ptr[plan->block_id[i]]);
+      } else {
+        free(plan->mem_ptr[plan->block_id[i]]);
+      }
       // explicitly NULL the pointer
       plan->mem_ptr[plan->block_id[i]] = NULL;
     } else {
@@ -708,59 +856,76 @@ tlsf_bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
 }
 
 /**
- * This function benchmarks tlsf in sequential malloc/frees
+ * This function benchmarks tlsf/native allocator using predefined plans which
+ * are comprised out of malloc/free pairs.
  */
 void
-tlsf_bench(wtlsf_t *pool, alloc_plan_t *plan) {
-  // check if pool is null
-  if(pool == NULL) {
-    printf(" !! Error pool cannot be NULL, cannot continue\n");
-    return;
-  }
+mem_bench(wtlsf_t *pool, alloc_plan_t *plan) {
+  
   // check if plan is null
   if(plan == NULL || plan->peak_alloc == 0 || plan->aggregated_alloc == 0) {
     printf(" !! Error allocation plan cannot be NULL, cannot continue\n");
     return;
   }
-  // check if our provided pool can execute the plan
-  if(plan->peak_alloc > pool->size) {
+
+  // check if pool is null -- we either use native allocator or the tlsf pool
+  if(pool == NULL) {
+    printf(" ** Null pool detected, using native allocator\n");
+  } else if (pool != NULL && plan->peak_alloc > pool->size) {
     printf(" !! Error, pool size of %zu is too small to satisfy peak allocation \
 of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
     return;
   }
+  
   // basic info
-  printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
-    plan->plan_size, pool->size);
+  if(pool != NULL) {
+    printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
+      plan->plan_size, pool->size);
+  } else {
+    printf(" -- Running %zu ops using the native memory allocator\n", 
+      plan->plan_size);
+  }
   unsigned long long ctx = tic(NULL);
   // execute the sequential plan
   switch(plan->type) {
     case ALLOC_SEQ: {
-      tlsf_bench_seq(pool, plan);
+      bench_seq(pool, plan);
       break;
     }
     case ALLOC_RAMP: {
-      tlsf_bench_ramp(pool, plan);
+      bench_ramp(pool, plan);
       break;
     }
     case ALLOC_HAMMER: {
-      tlsf_bench_hammer(pool, plan);
+      bench_hammer(pool, plan);
       break;
     }
     case ALLOC_CUSTOM: {
-      tlsf_bench_custom(pool, plan);
+      bench_custom(pool, plan);
       break;
     }
     default: {
-      tlsf_bench_seq(pool, plan);
+      bench_seq(pool, plan);
       break;
     }
   }
   // find the total elapsed time
-  double elapsed = toc(ctx, NULL, false);
-  printf(" -- Finished %zu ops in pool, elapsed cycles for bench was %f\n", 
-    plan->plan_size, elapsed);
-  printf(" -- xput: %lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
+  long double elapsed = toc(ctx, NULL, false);
+  if(pool != NULL) {
+    printf(" -- Finished %zu ops in pool, elapsed cycles for bench was %Le\n", 
+      plan->plan_size, elapsed);
+  } else {
+    printf(" -- Finished %zu ops, elapsed cycles for bench was %Le\n", 
+      plan->plan_size, elapsed);
+  }
+  printf(" -- xput: %Lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
 }
+
+/**
+ *
+ * TLSF bench end
+ * 
+ */
 
 /**
  * little hack to get the numbers showing with two digits even when it's < 10 which
@@ -804,7 +969,7 @@ create_iso8061_ts(char *dir, char *suffix, char* ext) {
   }
 
   // perform the conversion
-  num_to_str_pad(tm_mon_buf, mytime->tm_mon);
+  num_to_str_pad(tm_mon_buf, mytime->tm_mon+1); // offset month, due to range [0,11]
   num_to_str_pad(tm_mday_buf, mytime->tm_mday);
   num_to_str_pad(tm_hour_buf, mytime->tm_hour);
   num_to_str_pad(tm_min_buf, mytime->tm_min);
@@ -1262,11 +1427,12 @@ print_plan(alloc_plan_t *plan) {
  * an existing trace.
  */
 void 
-execute_plan() {
+execute_plan(bool use_native_alloc) {
+  // start hint
+  printf("\n ## Executing plan using %s allocator\n", 
+    use_native_alloc ? "native" : "tlsf");
   // return value
-  bool ret = false;
-  // our pool structure
-  wtlsf_t pool = {0};
+  bool ret = true;
   // our plan structure
   alloc_plan_t plan = {0};
 
@@ -1283,32 +1449,147 @@ execute_plan() {
   }
 
   // now run the experiment
-  char *tag = "Global Tag";
-  unsigned long long c_ctx = tic(tag);
+  char *ctag = "Global Tag cycles";
+  char *stag = "Timer tag";
+  clock_t s_ctx = tic_s(stag);
+  unsigned long long c_ctx = tic(ctag);
 
-  // create the pool
-  if(create_tlsf_pool(&pool, pool_size) == NULL) {
-    printf(" !! Error, fatal error encountered when creating the pool\n");
-    ret = false;
-  } else {  
-    // now run the bench
-    tlsf_bench(&pool, &plan);
-    // destroy the pool
-    destroy_tlsf_pool(&pool);
+  if(use_native_alloc) {
+    // use the native allocator
+    mem_bench(NULL, &plan);
+  } else {
+    // declare our pool structure
+    wtlsf_t pool = {0};
+    // create the pool
+    if(create_tlsf_pool(&pool, pool_size) == NULL) {
+      printf(" !! Error, fatal error encountered when creating the pool\n");
+      ret = false;
+    } else {  
+      // now run the bench
+      mem_bench(&pool, &plan);
+      // destroy the pool
+      destroy_tlsf_pool(&pool);
+    }
   }
 
   // timing point
-  toc(c_ctx, tag, true);
-  
+  toc(c_ctx, ctag, true);
+  toc_s(s_ctx, stag, true);
   //print_plan(&plan);
 
   // dump the plan
   if(dflag && ret) {
-    dump_plan(&plan, dump_mem_trace_suffix); 
+    if(use_native_alloc) {
+      dump_plan(&plan, dump_native_trace_suffix); 
+    } else {
+      dump_plan(&plan, dump_tlsf_trace_suffix); 
+    }
   }
   
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
+  // finish hint
+  printf(" ## Finished executing plan using %s allocator\n\n", 
+    use_native_alloc ? "native" : "tlsf");
+}
+
+/**
+ * Function that pins the current thread to a certain CPU id as 
+ * defined by `core_id`
+ * @param  core_id cpu id to pin
+ * @return         true if successful, false otherwise
+ */
+bool cpu_pin(int core_id) {
+  int ret = 0;
+  pthread_t tid;
+  cpu_set_t cpu_set;
+  // initialize the pthread to be self
+  tid = pthread_self();
+  // zero out the affinity mask
+  CPU_ZERO(&cpu_set);
+  // set the process affinity to be on core_id
+  CPU_SET(core_id, &cpu_set);
+  // try to set the affinity of the thread
+  ret = pthread_setaffinity_np(tid, sizeof(cpu_set_t), &cpu_set);
+  // check the result
+  if(ret != 0) {
+    printf(" !! Error, could not set affinity on core %d with internal id: %d\n", 
+      core_id+1, core_id);
+  } else {
+    printf(" ** Affinity set successful; using core %d with internal id: %d\n", 
+      core_id+1, core_id);
+  }
+  return ret != 0;
+}
+
+/**
+ * Enumerate available cores
+ */
+void
+enum_cpu_cores() {
+  core_count = get_nprocs_conf(); 
+  core_count_avail = get_nprocs();
+  printf(" ** Detected %d number of cores out of which usable are: %d\n", 
+    core_count, core_count_avail);
+}
+
+/**
+ * Stub to run our benchmark types (tlsf, native, or both)
+ */
+void
+run_bench() {
+  // handle affinity, if enabled
+  if(cflag) {
+    cpu_pin(def_cpu_core_id);
+  } else {
+    printf(" ** Using OS scheduled core affinity\n");
+  }
+
+  // benchmark type to run, currently we have three types
+  // tlsf, native, or both.
+  switch(bench_type) {
+    case BENCH_TLSF: {
+      // use tlsf allocator
+      execute_plan(false);
+      break;
+    }
+    case BENCH_NATIVE: {
+      // use native allocator
+      execute_plan(true);
+      break;
+    }
+    case BENCH_BOTH: {
+      // use native allocator
+      execute_plan(true);
+      // use tlsf allocator
+      execute_plan(false);
+      break;
+    }
+    default: {
+      // use tlsf allocator
+      execute_plan(false);
+      break;
+    }
+  }
+}
+
+/**
+ * Handle general initialization stuff.
+ */
+bool
+boostrap(int argc, char **argv) {
+  printf("\n");
+  // initialize the random number generator
+  srand(2);
+  // set the amount of cpu cores
+  enum_cpu_cores();
+  // parse arguments
+  if(!parse_args(argc, argv)) {
+    return false;
+  } 
+  // notify of dump flag
+  printf(" ** Dumping traces is: %s\n", dflag ? "ENABLED" : "DISABLED");
+  return true;
 }
 
 /**
@@ -1316,17 +1597,12 @@ execute_plan() {
  */
 int
 main(int argc, char **argv) {
-  printf("\n");
-  // initialize the random number generator
-  srand(2);
-  // parse arguments
-  if(!parse_args(argc, argv)) {
-    return 0;
-  } 
-  
-  // execute our plan based on arguments  
-  execute_plan();
-  
-  // finally return
-  return 0;
+  if(!boostrap(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  // run our benchmark
+  run_bench();
+
+  // finally, return
+  return EXIT_SUCCESS;
 }

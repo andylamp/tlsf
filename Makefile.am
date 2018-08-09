@@ -5,7 +5,8 @@ EXTRA_DIST = nio-tlsf.pc nio-tlsf.spec
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = nio-tlsf.pc
 
-AM_CFLAGS = -Wall -std=gnu11 -g -fsanitize=address -O3
+#AM_CFLAGS = -Wall -std=gnu11 -g -O3 -fsanitize=address
+AM_CFLAGS = -Wall -std=gnu11 -g -O3
 
 lib_LTLIBRARIES = libnio-tlsf.la
 
@@ -20,4 +21,4 @@ example_SOURCES = example.c $(HEADERS)
 example_LDADD = $(top_builddir)/libnio-tlsf.la
 
 tlsfbench_SOURCES = tlsf_bench.c $(HEADERS)
-tlsfbench_LDADD = $(top_builddir)/libnio-tlsf.la
+tlsfbench_LDADD = $(top_builddir)/libnio-tlsf.la -lpthread
