@@ -19,7 +19,7 @@ Arguments:
     -i FILE --in_file=FILE         import a specific trace file
     -f FVAL --free_cutoff=FVAL     free op cutoff to count as "over budget" [default: 800].
     -m MVAL --malloc_cutoff=MVAL   malloc op cutoff to count as "over budget" [default: 2000].
-    -o DIR --out_dir=DIR           location to save the generated plots [default: None].
+    -o DIR --out_dir=DIR           location to save the generated plots [default: ./traces/].
     -v --version                   show version number.
     -c --console                   enable if executing from console to avoid errors [default: False].
 """
@@ -34,8 +34,8 @@ from os.path import basename, isfile
 free_cutoff = 800
 malloc_cutoff = 2000
 out_dir = None
-infile = "./traces/20180629T195418Z_mem_trace_out.csv"
 plt = None
+infile = "./traces/20180629T195418Z_mem_trace_out.csv"
 
 
 def parse_file(f):
@@ -44,6 +44,7 @@ def parse_file(f):
     :param f: file path of the trace file
     :return: nothing
     """
+    global out_dir
     with open(f, 'r') as csv_fp:
         csv_reader = csv.reader(csv_fp)
         # skip the first two lines
@@ -72,27 +73,28 @@ def parse_file(f):
                 free_chunk_len.append(c_chunk)
                 if c_tim > free_cutoff:
                     free_spikes += 1
-
-        plot_hist2d(f + "malloc", "malloc ops", malloc_len, malloc_chunk_len, 40)
-        plot_hist2d(f + "free", "free ops", free_len, free_chunk_len, 40)
-        plot_hist_comb(f, malloc_len, free_len, "malloc", "free", 20)
+        fname_base = basename(f)
+        plot_hist2d(fname_base + "_malloc", out_dir, "malloc ops", malloc_len, malloc_chunk_len, 40)
+        plot_hist2d(fname_base + "_free", out_dir, "free ops", free_len, free_chunk_len, 40)
+        plot_hist_comb(fname_base, out_dir, malloc_len, free_len, "malloc", "free", 20)
         total_ops = len(malloc_len) + len(free_len)
-        print("Trace aggregate statistics")
-        print("Parsed filename: {}".format(basename(f)))
-        print("Cutoff threshold (in cycles): {} cycles for free and {} cycles for malloc".format(free_cutoff,
-                                                                                                 malloc_cutoff))
-        print("Total spikes: {} out of {} ops".format(malloc_spikes + free_spikes, total_ops))
-        print("Total malloc spikes: {} out of {} ops".format(malloc_spikes, len(malloc_len)))
-        print("Total free spikes: {} out of {} ops".format(free_spikes, len(free_len)))
-        print("Total spike %: {} %".format((100.0 * (malloc_spikes + free_spikes)) / total_ops))
-        print("Total malloc spike %: {} %".format((100.0 * malloc_spikes) / len(malloc_len)))
-        print("Total free spike %: {} %".format((100.0 * free_spikes) / len(free_len)))
+        print(" ** Trace aggregate statistics")
+        print(" -- Parsed filename: {}".format(fname_base))
+        print(" -- Cutoff threshold (in cycles): {} cycles for free and {} cycles for malloc"
+              .format(free_cutoff, malloc_cutoff))
+        print("\t --- Total spikes: {} out of {} ops".format(malloc_spikes + free_spikes, total_ops))
+        print("\t --- Total malloc spikes: {} out of {} ops".format(malloc_spikes, len(malloc_len)))
+        print("\t --- Total free spikes: {} out of {} ops".format(free_spikes, len(free_len)))
+        print("\t --- Total spike %: {} %".format((100.0 * (malloc_spikes + free_spikes)) / total_ops))
+        print("\t --- Total malloc spike %: {} %".format((100.0 * malloc_spikes) / len(malloc_len)))
+        print("\t --- Total free spike %: {} %".format((100.0 * free_spikes) / len(free_len)))
 
 
-def plot_hist2d(fname, title_tag, data_a, data_b, bins):
+def plot_hist2d(fname, dir_path, title_tag, data_a, data_b, bins):
     """This function plots two variables that have the same size in a 2d histogram
 
     :param fname: filename, which is used for the output filename
+    :param dir_path: the output directory path
     :param title_tag: title for the graph
     :param data_a: data a
     :param data_b: data b
@@ -116,17 +118,19 @@ def plot_hist2d(fname, title_tag, data_a, data_b, bins):
     plt.xlabel("Cycles spent")
     plt.title(str(len(data_b)) + " " + title_tag)
     plt.show()
-    fpath = fname + "_chunk_vs_cycles" + ".pdf"
+    fpath = dir_path + "/" + fname + "_chunk_vs_cycles" + ".pdf"
     if isfile(fpath):
         remove(fpath)
+    print(" ** Info saving: {} to path: {}".format(fname, dir_path))
     hist2d_fig.savefig(fpath, bbox_inches='tight')
 
 
-def plot_hist_comb(fname, data_a, data_b, data_a_tag, data_b_tag, bin_no):
+def plot_hist_comb(fname, dir_path, data_a, data_b, data_a_tag, data_b_tag, bin_no):
     """This function plots two histograms in the same figure using the same
     bin thresholds for both
 
     :param fname: filename, which is used for the output filename
+    :param dir_path: the output directory path
     :param data_a: data a
     :param data_b: data b
     :param bin_no: the number of bins to use
@@ -172,9 +176,10 @@ def plot_hist_comb(fname, data_a, data_b, data_a_tag, data_b_tag, bin_no):
 
     hist_fig.tight_layout()
     plt.show()
-    fpath = fname + ".pdf"
+    fpath = dir_path + "/" + fname + ".pdf"
     if isfile(fpath):
         remove(fpath)
+    print(" ** Info saving: {} to path: {}".format(fname, dir_path))
     hist_fig.savefig(fpath, bbox_inches='tight')
 
 
@@ -235,6 +240,8 @@ def parse_args():
     # handle output directory
     if arg_dict["--out_dir"] is not None:
         out_dir = arg_dict["--out_dir"]
+        if not out_dir.endswith("/"):
+            out_dir = out_dir + "/"
         print(" ** Info: using output directory: {}".format(out_dir))
 
     # handle infile
