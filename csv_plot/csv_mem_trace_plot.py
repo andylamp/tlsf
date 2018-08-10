@@ -1,17 +1,49 @@
+#!/usr/bin/python3
+"""csv_mem_trace_plot this script is designed to parse and plot the
+trace files produced by the our memory benchmark. The trace files
+are expected to have the following format:
+
+    line 0 (plan size): plan_size
+    lines 1 (headers): op_type,chunk_size,block_id,exec_time
+    lines 2...n (actual traces): malloc,36757504,0,8580.000000
+
+Usage:
+    csv_mem_trace_plot.py [(-i FILE | --infile=FILE) (-f FVAL | --free_cutoff=FVAL) \
+(-m MVAL | --malloc_cutoff=MVAL) (-o DIR | --out_dir=DIR) (-c | --console)]
+    csv_mem_trace_plot.py (-i FILE | --in_file=FILE)
+    csv_mem_trace_plot.py (-h | --help)
+    csv_mem_trace_plot.py (-v | --version)
+
+Arguments:
+    -h --help                      show this message
+    -i FILE --in_file=FILE         import a specific trace file
+    -f FVAL --free_cutoff=FVAL     free op cutoff to count as "over budget" [default: 800].
+    -m MVAL --malloc_cutoff=MVAL   malloc op cutoff to count as "over budget" [default: 2000].
+    -o DIR --out_dir=DIR           location to save the generated plots [default: None].
+    -v --version                   show version number.
+    -c --console                   enable if executing from console to avoid errors [default: False].
+"""
 import numpy as np
-from matplotlib import pyplot as plt
 import csv
-import sys
+import matplotlib
+from docopt import docopt
 from math import ceil
 from os import remove
-from os.path import splitext, basename, isfile
+from os.path import basename, isfile
 
 free_cutoff = 800
 malloc_cutoff = 2000
+out_dir = None
+infile = "./traces/20180629T195418Z_mem_trace_out.csv"
+plt = None
 
 
-#  parse the csv file that contains the measurements
 def parse_file(f):
+    """parse the csv file that contains the traces of the executed plan
+
+    :param f: file path of the trace file
+    :return: nothing
+    """
     with open(f, 'r') as csv_fp:
         csv_reader = csv.reader(csv_fp)
         # skip the first two lines
@@ -43,9 +75,10 @@ def parse_file(f):
 
         plot_hist2d(f + "malloc", "malloc ops", malloc_len, malloc_chunk_len, 40)
         plot_hist2d(f + "free", "free ops", free_len, free_chunk_len, 40)
-        plot_hist_comb(f, malloc_len, free_len, 20)
+        plot_hist_comb(f, malloc_len, free_len, "malloc", "free", 20)
         total_ops = len(malloc_len) + len(free_len)
         print("Trace aggregate statistics")
+        print("Parsed filename: {}".format(basename(f)))
         print("Cutoff threshold (in cycles): {} cycles for free and {} cycles for malloc".format(free_cutoff,
                                                                                                  malloc_cutoff))
         print("Total spikes: {} out of {} ops".format(malloc_spikes + free_spikes, total_ops))
@@ -57,6 +90,15 @@ def parse_file(f):
 
 
 def plot_hist2d(fname, title_tag, data_a, data_b, bins):
+    """This function plots two variables that have the same size in a 2d histogram
+
+    :param fname: filename, which is used for the output filename
+    :param title_tag: title for the graph
+    :param data_a: data a
+    :param data_b: data b
+    :param bins: the number of bins to use
+    :return:
+    """
     max_value_a = int(np.mean(data_a)) * 3
     max_value_b = int(np.mean(data_b)) * 3
 
@@ -80,12 +122,21 @@ def plot_hist2d(fname, title_tag, data_a, data_b, bins):
     hist2d_fig.savefig(fpath, bbox_inches='tight')
 
 
-def plot_hist_comb(fname, data_a, data_b, bin_no):
+def plot_hist_comb(fname, data_a, data_b, data_a_tag, data_b_tag, bin_no):
+    """This function plots two histograms in the same figure using the same
+    bin thresholds for both
+
+    :param fname: filename, which is used for the output filename
+    :param data_a: data a
+    :param data_b: data b
+    :param bin_no: the number of bins to use
+    :return: nothing
+    """
+    # find the reference for the bin clipping points
     max_value_a = int(np.mean(data_a)) * 2
     max_value_b = int(np.mean(data_b)) * 2
 
-    # take the largest
-
+    # take the largest value as a reference
     if max_value_a > max_value_b:
         max_val = max_value_a
     else:
@@ -102,7 +153,7 @@ def plot_hist_comb(fname, data_a, data_b, bin_no):
                                  np.clip(data_b, bins[0], bins[-1])],
                                 density=True,
                                 bins=bins, color=['#0087ab', '#a7cbeb'],
-                                label=['malloc', 'free'])
+                                label=[data_a_tag, data_b_tag])
 
     xlabels = [str(b) for b in bins[1:]]
     xlabels[-1] += '+'
@@ -128,12 +179,88 @@ def plot_hist_comb(fname, data_a, data_b, bin_no):
 
 
 def roundup(val, base):
+    """
+    Rounds the value to the nearest value that is a multiple of base.
+    :param val: the value to be rounded
+    :param base: the base to round to
+    :return: the final rounded value
+    """
     return int(ceil(val / base) * base)
 
 
+def parse_args():
+    """
+    This function parses the docopt dictionary and sets the respective globals
+    to their parsed or default values.
+    :return: nothing
+    """
+    # scope in the variables
+    global free_cutoff
+    global malloc_cutoff
+    global out_dir
+    global infile
+    global plt
+    # parse and generate the docopt dictionary
+    arg_dict = docopt(__doc__, version="0.1.0")
+    #print(arg_dict)
+
+    # handle malloc op cutoff
+    parsed_tag = tag_digit(arg_dict, "--malloc_cutoff")
+    if parsed_tag == 0:
+        print(" !! Error: Invalid value given for malloc cutoff, using default ({})"
+              .format(malloc_cutoff))
+    else:
+        print(" ** Info: malloc op cutoff is: {}"
+              .format(parsed_tag))
+        malloc_cutoff = parsed_tag
+
+    # handle free op cutoff
+    parsed_tag = tag_digit(arg_dict, "--free_cutoff")
+    if parsed_tag == 0:
+        print(" !! Error: Invalid value given for free cutoff, using default ({})"
+              .format(free_cutoff))
+    else:
+        print(" ** Info: free op cutoff is: {}"
+              .format(parsed_tag))
+        free_cutoff = parsed_tag
+
+    # handle console flag
+    if arg_dict["--console"] is not False:
+        matplotlib.use('agg')
+
+    # now import the plt
+    from matplotlib import pyplot
+    plt = pyplot
+
+    # handle output directory
+    if arg_dict["--out_dir"] is not None:
+        out_dir = arg_dict["--out_dir"]
+        print(" ** Info: using output directory: {}".format(out_dir))
+
+    # handle infile
+    if arg_dict["--infile"] is not None:
+        infile = arg_dict["--infile"]
+        print(" ** Info: using input trace file: {}".format(infile))
+
+
+def tag_digit(docopt_dict, tag):
+    """
+    This function is responsible for parsing an argument from the docopt dictionary
+    while checking if it's a number or not.
+    :param docopt_dict: the docopt parsed dictionary
+    :param tag: the argument tag to check the value
+    :return: the value if set, zero (0) otherwise
+    """
+    if docopt_dict[tag] is not None and docopt_dict[tag].isdigit():
+        return int(docopt_dict[tag])
+    else:
+        return 0
+
+
 if __name__ == '__main__':
-    ftrace = "./traces/20180629T195418Z_mem_trace_out.csv"
-    if len(sys.argv) > 1:
-        ftrace = sys.argv[1]
+    """
+    main stub, mainly parses arguments and calls the file parse method
+    """
+    parse_args()
     # parse the file
-    parse_file(ftrace)
+    parse_file(infile)
