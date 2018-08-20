@@ -1691,6 +1691,8 @@ bootstrap(int argc, char **argv) {
   log_fun("\n");
   // initialize the random number generator
   srand(2);
+  // set the amount of cpu cores
+  enum_cpu_cores();
   // parse arguments
   if(!parse_args(argc, argv)) {
     return false;
@@ -1699,8 +1701,6 @@ bootstrap(int argc, char **argv) {
   create_iso8061_ts(fname_buf);
   // boostrap logging
   bootstrap_logging(fname_buf, NULL);
-  // set the amount of cpu cores
-  enum_cpu_cores();
   // notify of dump flag
   log_fun(" ** Dumping traces is: %s\n", dflag ? "ENABLED" : "DISABLED");
   return true;
