@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <getopt.h>
 #include <string.h>
@@ -41,6 +42,9 @@
 
 /* tlsf lib */
 #include "tlsf.h"
+
+#define MAX_FNAME_BUF 100
+#define MAX_FPATH_BUF 2000
 
 /* tlsf wrapper for convenience */
 typedef struct _wtlsf_t  {
@@ -112,11 +116,13 @@ size_t blk_mul_min = 1;             // min multiplier
 size_t blk_mul_max = 6400;          // max multiplier
 
 // allocation configuration
-size_t def_trail = 80;          // default trail size
+size_t def_trail = 100;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;        // min benchmark trials
-size_t bench_trials = 100000000; // benchmark trials
+size_t bench_trials = 1000000; // benchmark trials
+//size_t bench_trials = 600000000; // benchmark trials
+
 
 // file format details
 int line_offset = 2;    // line offset
@@ -128,12 +134,24 @@ int core_count = -1;
 // no of available cores
 int core_count_avail = -1;
 
+// progress report divider 
+int prog_steps_div = 100000;
+
+// print buffer
+char fname_buf[MAX_FNAME_BUF];
+char fpath_buf[MAX_FPATH_BUF];
+
+// logging file pointer
+FILE *log_fp = NULL;
+
 // benchmark type (default is tlsf only)
 bench_type_t bench_type = BENCH_TLSF;
 
 // trace dump related
 char *dump_dir = "./traces";                            // dump directory
 char *dump_ext = "csv";                                 // dump extension
+char *log_dir = "./logs";                               // log directory
+char *log_ext = "log";                                  // log directory
 char *dump_tlsf_trace_suffix = "tlsf_mem_trace_out";    // tlsf suffix trace 
 char *dump_native_trace_suffix = "native_mem_trace_out";// native suffix trace 
 
@@ -149,6 +167,8 @@ bool cflag = false; // cpu pin flag
 bool dflag = false; // dump flag
 bool pflag = false; // import flag
 bool tflag = false; // custom trial flag
+bool iflag = false; // interactive (see progress)
+bool lflag = false; // logging flag
 
 // import plan (-p)
 char *imp_fname = NULL;
@@ -158,12 +178,29 @@ char *imp_fname = NULL;
  */
 
 /**
+ * My logging function
+ */
+void log_fun(const char *restrict fmt, ...) {
+  va_list args;
+  // log print
+  if(lflag && log_fp != NULL) {
+    va_start(args, fmt);
+    vfprintf(log_fp, fmt, args);
+    va_end(args);
+  }
+  // normal print
+  va_start(args, fmt);
+  vfprintf(stdout, fmt, args);
+  va_end(args);
+}
+
+/**
  * tic: function that starts the timing context
  */
 unsigned long long
 tic(char *msg) {
   if(msg != NULL) {
-    printf(" ** tick (%s)\n", msg);
+    log_fun(" ** tick (%s)\n", msg);
   }
   return __builtin_ia32_rdtsc();
 }
@@ -178,9 +215,9 @@ toc(unsigned long long start, char *msg, bool print) {
   unsigned long long diff = ((end - start)); /// CLOCKS_PER_SEC;
   if(print) {
     if(msg) {
-      printf(" ** toc (%s): Elapsed time %llu cycles\n", msg, diff);
+      log_fun(" ** toc (%s): Elapsed time %llu cycles\n", msg, diff);
     } else {
-      printf(" ** toc: Elapsed time %llu cycles\n", diff);
+      log_fun(" ** toc: Elapsed time %llu cycles\n", diff);
     }
   }
   // returns *cycles*
@@ -194,7 +231,7 @@ toc(unsigned long long start, char *msg, bool print) {
 clock_t
 tic_s(char *msg) {
   if(msg != NULL) {
-    printf(" ** tick_s (%s)\n", msg);
+    log_fun(" ** tick_s (%s)\n", msg);
   }
   // returns *time*
   return clock();
@@ -210,9 +247,9 @@ toc_s(clock_t start, char *msg, bool print) {
   double diff = ((double) end - start) / CLOCKS_PER_SEC;
   if(print) {
     if(msg) {
-      printf(" ** toc_s (%s): Elapsed time %lf seconds\n", msg, diff);
+      log_fun(" ** toc_s (%s): Elapsed time %lf seconds\n", msg, diff);
     } else {
-      printf(" ** toc_s: Elapsed time %lf seconds\n", diff);
+      log_fun(" ** toc_s: Elapsed time %lf seconds\n", diff);
     }
   }
   return diff;
@@ -252,11 +289,11 @@ size_t
 tag_seq(alloc_plan_t *plan, size_t trail_size) {
   if(plan->plan_size % 2 != 0 || 
     plan->plan_size % trail_size != 0) {
-    printf(" !! Cannot create allocation plan, plan size but be multiple \
+    log_fun(" !! Cannot create allocation plan, plan size but be multiple \
       of trail size and even\n");
     return 0;
   } else {
-    printf(" ** Plan size is %zu using a trail size of %zu\n", 
+    log_fun(" ** Plan size is %zu using a trail size of %zu\n", 
       plan->plan_size, trail_size);
   }
   // loop once and tag allocations
@@ -270,7 +307,7 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
       blk_size = block_gen();
       cur_alloc_size += blk_size;
       // tag malloc block
-      //printf(" -- Tagging malloc block at: %d with size of %zu bytes\n", j, blk_size);
+      //log_fun(" -- Tagging malloc block at: %d with size of %zu bytes\n", j, blk_size);
       // now tag allocation blocks
       plan->block_size[j] = blk_size;       // tag the block size
       plan->slot_type[j] = SLOT_MALLOC;     // tag the slot type, 'malloc'
@@ -303,7 +340,12 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
  * This function tags blocks using a ramp-type of plan
  */
 size_t
-tag_ramp(alloc_plan_t *plan) {
+tag_ramp(alloc_plan_t *plan, double load_factor) {
+  if(load_factor < 0 || load_factor >= 0.5) {
+    log_fun(" !! Error load factor needs to be between (0, 0.5]\n");
+  } else {
+    log_fun(" ** Load factor for ramp-phase is %lf\n", load_factor);
+  }
   //TODO
   return 0;
 }
@@ -312,7 +354,7 @@ tag_ramp(alloc_plan_t *plan) {
  * This function tags blocks using a hammer-type of plan
  */
 size_t
-tag_hammer(alloc_plan_t *plan) {
+tag_hammer(alloc_plan_t *plan, double load_factor) {
   //TODO
   return 0;
 }
@@ -326,29 +368,30 @@ tag_hammer(alloc_plan_t *plan) {
  *
  * ALLOC_HAMMER: All allocations are performed in pairs of alloc/dealloc
  */
-void
+bool
 tag_blocks(alloc_plan_t *plan) {
   size_t total_alloc_size = 0;
+  bool ret = false;
 
   // check plan types
   switch(plan->type) {
     case ALLOC_SEQ: {
-      printf(" ** Tagging blocks with allocation plan: SEQUENTIAL\n");
+      log_fun(" ** Tagging blocks with allocation plan: SEQUENTIAL\n");
       total_alloc_size = tag_seq(plan, def_trail);
       break;
     }
     case ALLOC_RAMP: {
-      printf(" ** Tagging blocks with allocation plan: RAMP\n");
-      total_alloc_size = tag_ramp(plan);
+      log_fun(" ** Tagging blocks with allocation plan: RAMP\n");
+      total_alloc_size = tag_ramp(plan, 0.5);
       break;
     }
     case ALLOC_HAMMER: {
-      printf(" ** Tagging blocks with allocation plan: HAMMER\n");
-      total_alloc_size = tag_hammer(plan);
+      log_fun(" ** Tagging blocks with allocation plan: HAMMER\n");
+      total_alloc_size = tag_hammer(plan, 0.5);
       break;
     }
     default: {
-      printf(" ** Tagging blocks with (default) allocation plan: SEQUENTIAL\n");
+      log_fun(" ** Tagging blocks with (default) allocation plan: SEQUENTIAL\n");
       plan->type = ALLOC_SEQ;
       total_alloc_size = tag_seq(plan, def_trail);
       break;
@@ -356,10 +399,13 @@ tag_blocks(alloc_plan_t *plan) {
   }
   // total allocation size should not be zero
   assert(total_alloc_size > 0);
-  printf(" ** Final tags: %zu out of %zu; Total plan pressure: %zu MB, \
-peak plan allocation: %zu MB\n", 
-    plan->plan_size/2, plan->plan_size, 
-    total_alloc_size/mb_div, plan->peak_alloc/mb_div);
+  ret = total_alloc_size > 0;
+  if(ret) {
+    log_fun(" ** Final tags: %zu out of %zu \n", plan->plan_size/2, plan->plan_size);
+    log_fun(" -- Total plan pressure: %zu MB with peak allocation: %zu MB\n", 
+      total_alloc_size/mb_div, plan->peak_alloc/mb_div);    
+  }
+  return ret;
 }
 
 /**
@@ -369,30 +415,30 @@ bool
 perform_plan_prealloc(alloc_plan_t *plan) {
   size_t plan_size = plan->plan_size;
   if(plan_size % 2 != 0) {
-    printf(" !! Error, plan size must be even and contain as many allocs as deallocs\n");
+    log_fun(" !! Error, plan size must be even and contain as many allocs as deallocs\n");
     return false;
   }
   // block size array
   if((plan->block_size = calloc(plan_size, sizeof(size_t))) == NULL) {
-    printf(" !! Failed to allocate block size\n");
+    log_fun(" !! Failed to allocate block size\n");
     return false;
   }
   // timings array
   if((plan->timings = calloc(plan_size, sizeof(double))) == NULL) {
-    printf(" !! Failed to allocate timings array\n");
+    log_fun(" !! Failed to allocate timings array\n");
     free(plan->block_size);
     return false;
   }
   // slot type array
   if((plan->slot_type = calloc(plan_size, sizeof(slot_type_t))) == NULL) {
-    printf(" !! Failed to allocate slot type array\n");
+    log_fun(" !! Failed to allocate slot type array\n");
     free(plan->block_size);
     free(plan->timings);
     return false;
   }
   // cur_malloc_size array
   if((plan->cur_malloc_size = calloc(plan_size / 2, sizeof(size_t))) == NULL) {
-    printf(" !! Failed to allocate cur malloc size array\n");
+    log_fun(" !! Failed to allocate cur malloc size array\n");
     free(plan->block_size);
     free(plan->timings);
     free(plan->slot_type);
@@ -400,7 +446,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
   }
   // mem_ptr
   if((plan->mem_ptr = calloc(plan_size / 2, sizeof(char *))) == NULL) {
-    printf(" !! Failed to allocate pointer array\n");
+    log_fun(" !! Failed to allocate pointer array\n");
     free(plan->block_size);
     free(plan->timings);
     free(plan->slot_type);
@@ -409,7 +455,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
   }
   // malloc tag time
   if((plan->malloc_tag_time = calloc(plan_size / 2, sizeof(int))) == NULL) {
-    printf(" !! Failed to allocate malloc tag time array\n");
+    log_fun(" !! Failed to allocate malloc tag time array\n");
     free(plan->block_size);
     free(plan->timings);
     free(plan->slot_type);
@@ -419,7 +465,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
   }
   // block id
   if ((plan->block_id = calloc(plan_size, sizeof(size_t))) == NULL) {
-    printf(" !! Failed to allocate block id array\n");
+    log_fun(" !! Failed to allocate block id array\n");
     free(plan->block_size);
     free(plan->timings);
     free(plan->slot_type);
@@ -429,7 +475,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     return false;
   }
 
-  printf(" ** Preallocated successfully a plan of size %zu\n", plan_size);
+  log_fun(" ** Preallocated successfully a plan of size %zu\n", plan_size);
   return true;
 }
 
@@ -448,17 +494,17 @@ bool
 gen_alloc_plan(size_t plan_size, alloc_plan_t *plan) {
   // basic error checks
   if(plan_size < min_trials) {
-    printf(" !! Not enough trials, cannot continue (given: %zu, min req: %zu)\n", 
+    log_fun(" !! Not enough trials, cannot continue (given: %zu, min req: %zu)\n", 
       plan_size, min_trials);
     return false;
   } else if(plan_size < 2) {
-    printf(" !! Cannot have a plan size < 2 provided was: %zu\n", plan_size);
+    log_fun(" !! Cannot have a plan size < 2 provided was: %zu\n", plan_size);
     return false;
   } else if(plan_size % 2 != 0) {
-    printf(" !! Cannot have an odd plan size, given %zu \n", plan_size);
+    log_fun(" !! Cannot have an odd plan size, given %zu \n", plan_size);
     return false;
   } else if(plan == NULL) {
-    printf(" !! Null plan struct provided, cannot continue\n");
+    log_fun(" !! Null plan struct provided, cannot continue\n");
     return false;
   }
   // erase the structure
@@ -485,48 +531,48 @@ void
 destroy_alloc_plan(alloc_plan_t *plan) {
   // check if we have a valid pointer
   if(plan == NULL) {
-    printf(" !! No valid plan provided, cannot continue\n");
+    log_fun(" !! No valid plan provided, cannot continue\n");
     return;
   }
   // now check if we have some addresses
   if(plan->mem_ptr != NULL) {
-    printf(" -- Valid memory block pointer array found, freeing\n");
+    log_fun(" -- Valid memory block pointer array found, freeing\n");
     free(plan->mem_ptr); 
     plan->mem_ptr = NULL;
   }
   // check if we have a malloc tag array
   if(plan->malloc_tag_time != NULL) {
-    printf(" -- Valid malloc tag array found, freeing\n");
+    log_fun(" -- Valid malloc tag array found, freeing\n");
     free(plan->malloc_tag_time);
     plan->malloc_tag_time = NULL;
   }
   // check if we have a block id array
   if(plan->block_id != NULL) {
-    printf(" -- Valid block_id array found, freeing\n");
+    log_fun(" -- Valid block_id array found, freeing\n");
     free(plan->block_id);
     plan->block_id = NULL;
   }
   // check if we have a cur malloc size type array
   if (plan->cur_malloc_size != NULL) {
-    printf(" -- Valid cur malloc size array found, freeing\n");
+    log_fun(" -- Valid cur malloc size array found, freeing\n");
     free(plan->cur_malloc_size);
     plan->cur_malloc_size = NULL;
   }
   // check if we have a valid block size type array
   if(plan->block_size != NULL) {
-    printf(" -- Valid block size array found, freeing\n");
+    log_fun(" -- Valid block size array found, freeing\n");
     free(plan->block_size);
     plan->block_size = NULL;
   }
   // check if we have a valid allocation type array
   if(plan->slot_type != NULL) {
-    printf(" -- Valid allocation type array found, freeing\n");
+    log_fun(" -- Valid allocation type array found, freeing\n");
     free(plan->slot_type);
     plan->slot_type = NULL;
   }
   // check if we have a valid timings array
   if(plan->timings != NULL) {
-    printf(" -- Valid timings array found, freeing\n");
+    log_fun(" -- Valid timings array found, freeing\n");
     free(plan->timings);
     plan->timings = NULL;
   }
@@ -541,7 +587,7 @@ parse_args(int argc, char **argv) {
   bool ret = true;
   opterr = 0;
   int c;
-  while((c = getopt(argc, argv, "b:c:dp:t:")) != -1) {
+  while((c = getopt(argc, argv, "b:c:di:lp:t:")) != -1) {
     switch(c) {
       case 'b': {
         // raise bench flag
@@ -551,22 +597,22 @@ parse_args(int argc, char **argv) {
           int num = (int) strtol(optarg, &endp, 0);
           switch(num) {
             case 1: {
-              printf(" ** Benching TLSF allocator only\n");
+              log_fun(" ** Benching TLSF allocator only\n");
               bench_type = BENCH_TLSF;
               break;
             }
             case 2: {
-              printf(" ** Benching NATIVE allocator only\n");
+              log_fun(" ** Benching NATIVE allocator only\n");
               bench_type = BENCH_NATIVE;
               break;
             }
             case 3: {
-              printf(" ** Benching TLSF & NATIVE allocators\n");
+              log_fun(" ** Benching TLSF & NATIVE allocators\n");
               bench_type = BENCH_BOTH;
               break;
             }
             default: {
-              printf(" !! Error could not parse valid bench flag using default\n");
+              log_fun(" !! Error could not parse valid bench flag using default\n");
               break;
             }
           }
@@ -581,15 +627,15 @@ parse_args(int argc, char **argv) {
           errno = 0;
           int num = (int) strtol(optarg, &endp, 0);
           if(num == 0) {
-            printf(" !! Error could not convert given value to allowed range: [1, %d]\n",
+            log_fun(" !! Error could not convert value to allowed range: [1, %d]\n",
               core_count_avail);
             ret = false;
           } else if(num < 0 || num >= core_count_avail) {
-            printf(" !! Error core id given (%d) larger than allowed (%d)\n", 
+            log_fun(" !! Error core id given (%d) larger than allowed (%d)\n", 
               num, core_count_avail);
             ret = false;
           } else {
-            printf(" ** Valid affinity core id (%d) parsed, will try to set\n", num);
+            log_fun(" ** Valid affinity core id (%d) parsed, will try to set\n", num);
             def_cpu_core_id = num-1;
           }
         }
@@ -600,14 +646,37 @@ parse_args(int argc, char **argv) {
         // raise the dump flag
         dflag = true;
         break;
-      }      
+      }    
+      // report progress steps
+      case 'i': {
+        iflag = true;
+        if(optarg != NULL) {
+          char *endp;
+          errno = 0;
+          int num = (int) strtol(optarg, &endp, 0);
+          if(num <= 0) {
+            log_fun(" !! Error: could not convert value to allowed range: [%d, +oo]\n",
+              prog_steps_div);
+            ret = false;
+          } else {
+            log_fun(" ** Valid progress step parsed %d, setting\n", num);
+            prog_steps_div = num;
+          }
+        }
+        break;
+      }  
+      // logging
+      case 'l': {
+        lflag = true;
+        break;
+      }
       // parse custom plan from file, if supplied
       case 'p': {
         // raise the custom plan flag
         pflag = true;
         // set the filename
         if(optarg == NULL) {
-          printf(" !! Error, p flag requires a plan trace file as an argument\n");
+          log_fun(" !! Error, p flag requires a plan trace file as an argument\n");
           ret = false;
         } else {
           imp_fname = optarg;
@@ -619,24 +688,24 @@ parse_args(int argc, char **argv) {
         // raise t flag
         tflag = true;
         if(optarg == NULL) {
-          printf(" !! Error, t requires an argument > 0\n");
+          log_fun(" !! Error, t requires an argument > 0\n");
           ret = false;
         } else {
           char *endp;
           long t_trials = strtol(optarg, &endp, 0);
           if(t_trials == 0) {
-            printf(" !! Error, could not parse the suppled -t argument\n");
+            log_fun(" !! Error, could not parse the suppled -t argument\n");
             ret = false;
           } else if(optarg != endp && *endp == '\0') {
             if(t_trials < min_trials) {
-              printf(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
+              log_fun(" !! Error: trial number given (%zu) is low, reverting to default %zu\n", 
                 t_trials, min_trials);
             } else {
-              printf(" ** Trials set to %zu\n", t_trials);
+              log_fun(" ** Trials set to %zu\n", t_trials);
               bench_trials = (size_t) t_trials;
             }
           } else {
-            printf(" !! Error: Invalid argument supplied, reverting to default\n");
+            log_fun(" !! Error: Invalid argument supplied, reverting to default\n");
             ret = false;
           }
         }
@@ -645,12 +714,13 @@ parse_args(int argc, char **argv) {
 
       // handle arguments that require a parameter
       case '?': {
-        printf(" !! Error: argument -%c, requires an parameter\n", optopt);
-        printf("\n    Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
+        log_fun(" !! Error: argument -%c, requires an parameter\n", optopt);
+        log_fun("\n    Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
         ret = false;
+        break;
       }
       default: {
-        printf("   Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
+        log_fun("   Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
         ret = false;
         break;
       }
@@ -658,7 +728,7 @@ parse_args(int argc, char **argv) {
   }
   // check for concurrent flags
   if(pflag && tflag) {
-    printf(" !! Error: cannot have both -p and -t at the same time\n");
+    log_fun(" !! Error: cannot have both -p and -t at the same time\n");
     ret = false;
   }
   return ret;
@@ -672,22 +742,22 @@ char *
 alloc_mem(size_t size) {
   char *mem = NULL;
   if(size < min_pool_size) {
-    printf(" !! Size was below min threshold which is %zu bytes\n", min_pool_size);
+    log_fun(" !! Size was below min threshold which is %zu bytes\n", min_pool_size);
     return NULL;
   } else if((mem = calloc(sizeof(char), size)) == NULL) {
-    printf(" !! Requested memory failed to yield, aborting\n");
+    log_fun(" !! Requested memory failed to yield, aborting\n");
     return NULL;
   } else {
-    printf(" -- Ghostly allocated memory of size: %zu bytes\n", size);
+    log_fun(" -- Ghostly allocated memory of size: %zu bytes\n", size);
   }
-  printf(" -- Warming up memory...\n");
+  log_fun(" -- Warming up memory...\n");
   // forcefully request memory
   char *mem_addr = mem;
   for (int i = 0; i < size; ++i) {
     *mem_addr = 0;
     mem_addr++;
   }
-  printf(" -- Returning warmed-up memory of size: %zu bytes\n", size);
+  log_fun(" -- Returning warmed-up memory of size: %zu bytes\n", size);
   return mem;
 }
 
@@ -698,29 +768,29 @@ tlsf_t *
 create_tlsf_pool(wtlsf_t *pool, size_t size) {
   // check for valid input
   if(pool == NULL) {
-    printf(" !! No pool provided\n");
+    log_fun(" !! No pool provided\n");
     return NULL;
   } 
   // check for valid size
   if(size < min_pool_size) {
-    printf(" !! Pool must be at least of size %zu and requested: %zu\n", 
+    log_fun(" !! Pool must be at least of size %zu and requested: %zu\n", 
       min_pool_size, size);
   }
   // set the size
   pool->size = size;
   // try to allocate (warm) memory
   if((pool->mem = alloc_mem(pool->size)) == NULL) {
-    printf(" !! Failed to allocate and warm-up memory, cannot continue\n");
+    log_fun(" !! Failed to allocate and warm-up memory, cannot continue\n");
     return NULL;
   }
 
   // now, actually try to create tlsf
-  printf(" -- Attempting to create tlsf pool of size: %zu bytes \n", pool->size);
+  log_fun(" -- Attempting to create tlsf pool of size: %zu bytes \n", pool->size);
   pool->tlsf_ptr = tlsf_create_with_pool(pool->mem, pool->size);
   if(pool->tlsf_ptr == NULL) {
-    printf(" !! Failed to create tlsf pool\n");
+    log_fun(" !! Failed to create tlsf pool\n");
   } else {
-    printf(" -- Created a tlsf pool with size %zu bytes\n", pool->size);
+    log_fun(" -- Created a tlsf pool with size %zu bytes\n", pool->size);
   }
   return pool->tlsf_ptr;
 }
@@ -732,10 +802,10 @@ void
 destroy_tlsf_pool(wtlsf_t *pool) {
   // check for valid input
   if(pool == NULL) {
-    printf(" !! Cannot destroy, no valid pool provided\n");
+    log_fun(" !! Cannot destroy, no valid pool provided\n");
     return;
   }
-  printf(" -- Destroying tlsf pool of size %zu\n", pool->size);
+  log_fun(" -- Destroying tlsf pool of size %zu\n", pool->size);
   // first, destroy the pool
   if(pool->tlsf_ptr) {
     tlsf_destroy(pool->tlsf_ptr);
@@ -757,7 +827,7 @@ destroy_tlsf_pool(wtlsf_t *pool) {
  */
 void
 bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
-  printf(" !! Running a SEQUENTIAL plan type of size: %zu\n", plan->plan_size);
+  log_fun(" !! Running a SEQUENTIAL plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
   unsigned long long t_ctx = 0;
@@ -765,7 +835,7 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
     t_ctx = tic(NULL);
     // check if we have an allocation
     if(plan->slot_type[i] == SLOT_MALLOC) {
-      //printf(" -- Allocating block at %d with size %zu bytes\n", 
+      //log_fun(" -- Allocating block at %d with size %zu bytes\n", 
       //  i, plan->block_size[i]);
       if(pool != NULL) {
         plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);  
@@ -776,7 +846,7 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
       mem_pivot++;
     } else if(plan->slot_type[i] == SLOT_FREE) {
       int free_blk = (int) plan->block_id[i];
-      //printf(" -- Freeing block at %d\n", free_blk);
+      //log_fun(" -- Freeing block at %d\n", free_blk);
       if(pool != NULL) {
         tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
       } else {
@@ -787,12 +857,16 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
       //plan->cur_malloc_size[free_blk] = 0;
     } else {
       // error
-      printf(" !! Error, encountered empty slot of a full plan\n");
+      log_fun(" !! Error, encountered empty slot of a full plan\n");
     }
     // calculate timing delta
     timed_seg = toc(t_ctx, NULL, NULL);
     // add the timed segment to the timing array
     plan->timings[i] = timed_seg;
+    // report progress
+    if(i % prog_steps_div == 0) {
+      log_fun(" -- Progress: completed %d out of %zu ops\n", i, plan->plan_size);
+    }
   }
   assert(mem_pivot == plan->plan_size / 2);
 }
@@ -802,7 +876,7 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void
 bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
-  printf(" !! Running a RAMP plan type of size: %zu\n", plan->plan_size);
+  log_fun(" !! Running a RAMP plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
 
@@ -811,7 +885,7 @@ bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void 
 bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
-  printf(" !! Running a HAMMER plan type of size: %zu\n", plan->plan_size);
+  log_fun(" !! Running a HAMMER plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
 
@@ -820,7 +894,7 @@ bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
  */
 void
 bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
-  printf(" !! Running a CUSTOM plan type of size: %zu\n", plan->plan_size);
+  log_fun(" !! Running a CUSTOM plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
   unsigned long long t_ctx = 0;
@@ -845,7 +919,7 @@ bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
       // explicitly NULL the pointer
       plan->mem_ptr[plan->block_id[i]] = NULL;
     } else {
-      printf(" !! Error, encountered empty slot on a full plan\n");
+      log_fun(" !! Error, encountered empty slot on a full plan\n");
     }
     // calculate timing delta
     timed_seg = toc(t_ctx, NULL, NULL);
@@ -864,25 +938,25 @@ mem_bench(wtlsf_t *pool, alloc_plan_t *plan) {
   
   // check if plan is null
   if(plan == NULL || plan->peak_alloc == 0 || plan->aggregated_alloc == 0) {
-    printf(" !! Error allocation plan cannot be NULL, cannot continue\n");
+    log_fun(" !! Error allocation plan cannot be NULL, cannot continue\n");
     return;
   }
 
   // check if pool is null -- we either use native allocator or the tlsf pool
   if(pool == NULL) {
-    printf(" ** Null pool detected, using native allocator\n");
+    log_fun(" ** Null pool detected, using native allocator\n");
   } else if (pool != NULL && plan->peak_alloc > pool->size) {
-    printf(" !! Error, pool size of %zu is too small to satisfy peak allocation \
+    log_fun(" !! Error, pool size of %zu is too small to satisfy peak allocation \
 of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
     return;
   }
   
   // basic info
   if(pool != NULL) {
-    printf(" -- Running %zu ops with a pool size of %zu bytes\n", 
+    log_fun(" -- Running %zu ops with a pool size of %zu bytes\n", 
       plan->plan_size, pool->size);
   } else {
-    printf(" -- Running %zu ops using the native memory allocator\n", 
+    log_fun(" -- Running %zu ops using the native memory allocator\n", 
       plan->plan_size);
   }
   unsigned long long ctx = tic(NULL);
@@ -912,13 +986,13 @@ of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
   // find the total elapsed time
   long double elapsed = toc(ctx, NULL, false);
   if(pool != NULL) {
-    printf(" -- Finished %zu ops in pool, elapsed cycles for bench was %Le\n", 
+    log_fun(" -- Finished %zu ops in pool, elapsed cycles for bench was %Le\n", 
       plan->plan_size, elapsed);
   } else {
-    printf(" -- Finished %zu ops, elapsed cycles for bench was %Le\n", 
+    log_fun(" -- Finished %zu ops, elapsed cycles for bench was %Le\n", 
       plan->plan_size, elapsed);
   }
-  printf(" -- xput: %Lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
+  log_fun(" -- xput: %Lf [malloc/free] ops/cycle\n", plan->plan_size/elapsed);
 }
 
 /**
@@ -945,13 +1019,12 @@ num_to_str_pad(char *buf, int number) {
 }
 
 /**
- * Creates a timestamp with the filename based on the ISO 8061 specification.
+ * Creates a timestamp filename based on the ISO 8061 specification.
  */
 char *
-create_iso8061_ts(char *dir, char *suffix, char* ext) {
+create_iso8061_ts(char *fname_buf) {
   time_t ctime;       // holds unix time
   struct tm *mytime;  // holds local time
-  size_t buf_sz = 100;
   // get current time
   time(&ctime);
   // buffers
@@ -962,11 +1035,6 @@ create_iso8061_ts(char *dir, char *suffix, char* ext) {
   char tm_sec_buf[3] = {0};
   // get local time
   mytime = localtime(&ctime);
-  char *buf = calloc(buf_sz, sizeof(char));
-  if(buf == NULL) {
-    printf(" !! Error could not allocate memory to create timestamp\n");
-    return NULL;
-  }
 
   // perform the conversion
   num_to_str_pad(tm_mon_buf, mytime->tm_mon+1); // offset month, due to range [0,11]
@@ -976,11 +1044,30 @@ create_iso8061_ts(char *dir, char *suffix, char* ext) {
   num_to_str_pad(tm_sec_buf, mytime->tm_sec);  
 
   // finally format the timestamp to be in ISO 8061
-  snprintf(buf, buf_sz, "%s/%d%s%sT%s%s%sZ_%s.%s", dir,
+  snprintf(fname_buf, MAX_FNAME_BUF, "%d%s%sT%s%s%sZ", 
     mytime->tm_year+1900, tm_mon_buf, tm_mday_buf,
-    tm_hour_buf, tm_min_buf, tm_sec_buf, suffix, ext);
+    tm_hour_buf, tm_min_buf, tm_sec_buf);
+
   // finally return
-  return buf;
+  return fname_buf;
+}
+
+/**
+ * Create a *full* path filename which includes the directory path, filename
+ * as well as extension and returns it as a pointer.
+ */
+char *
+create_full_fpath(char* dest, size_t buf_sz, 
+  char *dir, char *fname, char *suffix, char *ext) {
+  int ret = 0;
+  // two different versions, one using a suffix and the other plain.
+  if(suffix == NULL) {
+    ret = snprintf(dest, buf_sz, "%s/%s.%s", dir, fname, ext);
+  } else {
+    ret = snprintf(dest, buf_sz, "%s/%s_%s.%s", dir, fname, suffix, ext);
+  }
+  // crate the filename and return (error is when snprintf return value is < 0)
+  return ret < 0 ? NULL : dest;
 }
 
 /**
@@ -990,14 +1077,14 @@ bool
 create_dir(char *dir_full_path) {
   struct stat st = {0};
   if(stat(dir_full_path, &st) == -1) {
-    printf(" ** Specified dump directory does not exist, creating\n");
+    log_fun(" ** Specified dump directory does not exist, creating\n");
     if(mkdir(dir_full_path, 0700) != 0) {
-      printf(" !! Could not create directory: %s\n", dir_full_path);
+      log_fun(" !! Could not create directory: %s\n", dir_full_path);
       return false;
     } else {
-      printf(" ** Directory (%s) created successfully\n", dir_full_path);
+      log_fun(" ** Directory (%s) created successfully\n", dir_full_path);
     }
-    printf(" ** Directory (%s) already exists\n", dir_full_path);
+    log_fun(" ** Directory (%s) already exists\n", dir_full_path);
   }
   return true;
 }
@@ -1006,28 +1093,21 @@ create_dir(char *dir_full_path) {
  * Create the file to store the results
  */
 FILE *
-create_dump_file(char *fname) {
+create_out_file(char *fname, char *suffix, char *ext, char *dir, char *tag, char *fpath_buf) {
   // try to create the directory, if needed
-  if(!create_dir("./traces/")) {
+  if(!create_dir(dir)) {
     return NULL;
   }
-  // create the timestamp
-  char *ts_fname = create_iso8061_ts(dump_dir, fname, dump_ext);
-  if(ts_fname == NULL) {
-    printf(" !! Error, null timestamp returned\n");
-    return NULL;
-  }
+  // create the full name
+  char *full_path = create_full_fpath(fpath_buf, MAX_FPATH_BUF, 
+    dir, fname, suffix, ext);
   // open the file
-  FILE *fp = fopen(ts_fname, "w");
+  FILE *fp = fopen(full_path, "w");
   // check for errors
   if(fp == NULL) {
-    printf(" !! Error, could not open the file\n");
+    log_fun(" !! Error, could not open the file\n");
   } else {
-    printf(" ** Trace dump file %s open for writing\n", ts_fname);
-  }
-  // now free up the timestamp resources
-  if(ts_fname != NULL) {
-    free(ts_fname);
+    log_fun(" ** %s file %s open for writing\n", tag, full_path);
   }
   // return the file for writing
   return fp;
@@ -1037,26 +1117,28 @@ create_dump_file(char *fname) {
  * Function that notified the user for trace dump file closure.
  */
 void
-close_dump_file(FILE *fp) {
-  printf(" ** Trace dump file closed successfully\n");
-  // close the file
-  fclose(fp);
+close_tag_file(FILE *fp, char *tag) {
+  if(fp != NULL) {
+    log_fun(" ** %s file closed successfully\n", tag);
+    // close the file
+    fclose(fp);
+  }
 }
 
 /**
  * Dump results into a plot-friendly format
  */
 void
-dump_plan(alloc_plan_t *plan, char *fname) {
+dump_plan(alloc_plan_t *plan, char *fname, char* suffix) {
   if(plan == NULL) {
-    printf(" !! Error null plan supplied, cannot continue\n");
+    log_fun(" !! Error null plan supplied, cannot continue\n");
   } else {
-    printf(" ** Dumping allocation plan details with size %zu\n", plan->plan_size);
+    log_fun(" ** Dumping allocation plan details with size %zu\n", plan->plan_size);
   }
-  FILE *fp = create_dump_file(fname);
+  FILE *fp = create_out_file(fname, suffix, dump_ext, dump_dir, "Trace dump", fpath_buf);
   // sanity check
   if(fp == NULL) {
-    printf(" !! Error, null file pointer, cannot continue dump\n");
+    log_fun(" !! Error, null file pointer, cannot continue dump\n");
     return;
   }
   // write the plan size in the first line
@@ -1087,15 +1169,15 @@ dump_plan(alloc_plan_t *plan, char *fname) {
       // increment the block count
       blk_cnt++;
     } else {
-      printf(" !! Error encountered empty slot on a full plan\n");
+      log_fun(" !! Error encountered empty slot on a full plan\n");
     }
   }
   // close the file
-  close_dump_file(fp);
+  close_tag_file(fp, "Trace file");
 }
 
 /** 
- * function to check header
+ * Function to check header
  */
 bool
 check_trace_header(char *header) {
@@ -1103,29 +1185,29 @@ check_trace_header(char *header) {
   // op_type token
   tok = strtok(header, tok_delim_cm);
   if(tok == NULL || strcmp(tok, "op_type") != 0) {
-    printf(" !! Header seems invalid, first token needs to be 'op_type' cannot continue\n");
+    log_fun(" !! Header seems invalid, first token needs to be 'op_type' cannot continue\n");
     return false;
   }
   // chunk_size token
   tok = strtok(NULL, tok_delim_cm); 
   if(tok == NULL || strcmp(tok, "chunk_size") != 0) {
-    printf(" !! Header seems invalid, second token needs to be 'chunk_size' cannot continue\n");
+    log_fun(" !! Header seems invalid, second token needs to be 'chunk_size' cannot continue\n");
     return false;
   } 
   // block_id token
   tok = strtok(NULL, tok_delim_nl);
   if(tok == NULL) {
-    printf(" !! Header seems invalid, third token needs to be 'block_id' cannot continue\n");
+    log_fun(" !! Header seems invalid, third token needs to be 'block_id' cannot continue\n");
     return false;
   } else if(strcmp(tok, "block_id") == 0) {
-    printf(" -- Header seems valid, trying to parse plan\n");
+    log_fun(" -- Header seems valid, trying to parse plan\n");
     return true;
   } else if(strcmp(tok, "block_id,exec_time") == 0) {
-    printf(" !! Header seems valid, but seems to be from output trace; using first 3 fields\n");
+    log_fun(" !! Header seems valid, but seems to be from output trace; using first 3 fields\n");
     parsing_out_traces = true;
     return true;
   } else {
-    printf(" !! Header seems invalid, cannot continue\n");
+    log_fun(" !! Header seems invalid, cannot continue\n");
     return false;
   }
 }
@@ -1162,18 +1244,18 @@ parse_trace_line(char *line, int *line_no, int *malloc_cnt,
   // handle op_type
   tok = strtok(line, tok_delim_cm);
   if(tok == NULL) {
-    printf(" !! Error, encountered at line %d, NULL token at position %zu\n",
+    log_fun(" !! Error, encountered at line %d, NULL token at position %zu\n",
       (*line_no) + 1, tok_cnt);
     return false;
   } else if(strcmp("malloc", tok) == 0) {
-    //printf(" -- malloc op_type detected\n");
+    //log_fun(" -- malloc op_type detected\n");
     slot = SLOT_MALLOC;
   } else if(strcmp("free", tok) == 0) {
-    //printf(" -- free op_type detected\n");
+    //log_fun(" -- free op_type detected\n");
     // handle free op_type
     slot = SLOT_FREE;
   } else {
-    printf(" !! Error invalid op_type detected: '%s', expecting \
+    log_fun(" !! Error invalid op_type detected: '%s', expecting \
 either 'malloc' or 'free'\n", tok);
     return false;
   }
@@ -1185,7 +1267,7 @@ either 'malloc' or 'free'\n", tok);
   tok = strtok(NULL, tok_delim_cm);
   long chunk_size = 0;
   if(tok == NULL) {
-    printf(" !! Error, encountered at line %d, NULL token at position %zu\n",
+    log_fun(" !! Error, encountered at line %d, NULL token at position %zu\n",
       *line_no, tok_cnt);
     return false;
   }
@@ -1193,11 +1275,11 @@ either 'malloc' or 'free'\n", tok);
   errno = 0;
   chunk_size = strtol(tok, NULL, 10);
   if(chunk_size <= 0 || chunk_size == ULLONG_MAX || errno == EINVAL) {
-    printf(" !! Error, encountered at line %d, could not convert \
+    log_fun(" !! Error, encountered at line %d, could not convert \
 token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
     return false;
   } else {
-    //printf(" -- chunk_size of %ld bytes, parsed\n", chunk_size);
+    //log_fun(" -- chunk_size of %ld bytes, parsed\n", chunk_size);
   }
 
   // increment token count
@@ -1206,7 +1288,7 @@ token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
   // handle block_id
   tok = strtok(NULL, tok_delim_nl);
   if(tok == NULL) {
-    printf(" !! Error, encountered at line %d, NULL token at position %zu\n",
+    log_fun(" !! Error, encountered at line %d, NULL token at position %zu\n",
       (*line_no) + 1, tok_cnt);
     return false;
   }
@@ -1214,7 +1296,7 @@ token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
   if(parsing_out_traces) {
     tok = strtok(tok, tok_delim_cm);
     if(tok == NULL) {
-      printf(" !! Error, encountered at line %d, NULL token at position %zu\n",
+      log_fun(" !! Error, encountered at line %d, NULL token at position %zu\n",
         (*line_no) + 1, tok_cnt);
       return false;
     }
@@ -1225,15 +1307,15 @@ token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
   errno = 0;
   block_id = strtol(tok, NULL, 10);
   if(block_id < 0 || ((block_id == 0 || block_id == ULONG_MAX) && errno == EINVAL)) {
-    printf(" !! Error, encountered at line %d, could not convert \
+    log_fun(" !! Error, encountered at line %d, could not convert \
 token '%s' at position %zu to 'size_t'\n", (*line_no) + 1, tok, tok_cnt);
     return false;
   } else if(block_id > plan->plan_size/2) {
-    printf(" !! Error, it appears block_id: %ld is larger than the \
+    log_fun(" !! Error, it appears block_id: %ld is larger than the \
 allowed limit plan_size/2 (%zu)\n", block_id, plan->plan_size/2);
       return false;
   } else {
-    //printf(" -- block_id %ld, parsed\n", block_id);
+    //log_fun(" -- block_id %ld, parsed\n", block_id);
   }
   
   // calculate the index
@@ -1241,12 +1323,12 @@ allowed limit plan_size/2 (%zu)\n", block_id, plan->plan_size/2);
   plan->block_id[cur_idx] = block_id;
   plan->block_size[cur_idx] = chunk_size;
   if(plan->slot_type[cur_idx] != SLOT_EMPTY) {
-    printf(" !! Error, encountered at line %d a non-empty slot in an unexpected \
+    log_fun(" !! Error, encountered at line %d a non-empty slot in an unexpected \
 position.\n", (*line_no) + 1);
     return false;
   } else if(slot == SLOT_MALLOC) {
     if(block_id != *malloc_cnt) {
-      printf(" !! Error, encountered at line %d block_id (%ld) provided for \
+      log_fun(" !! Error, encountered at line %d block_id (%ld) provided for \
 malloc is not valid, expecting: %d\n", (*line_no) + 1, block_id, *malloc_cnt);
       return false;
     }
@@ -1263,7 +1345,7 @@ malloc is not valid, expecting: %d\n", (*line_no) + 1, block_id, *malloc_cnt);
     int malloc_slot = plan->malloc_tag_time[block_id];
     // now check if the pointed 'malloc' has the same block id as the 'free' being parsed
     if(plan->block_id[malloc_slot] != block_id) {
-      printf(" !! Error, encountered at line %d block_id for respective \
+      log_fun(" !! Error, encountered at line %d block_id for respective \
 malloc (%zu)/free (%zu) do not match.\n", 
       (*line_no) + 1, plan->block_id[malloc_slot], block_id);
       return false;
@@ -1272,7 +1354,7 @@ malloc (%zu)/free (%zu) do not match.\n",
     // update the current allocation size
     *cur_alloc -= chunk_size;
   } else {
-    printf(" !! Error, encountered at line %d an unexpected empty-slot type.\n", 
+    log_fun(" !! Error, encountered at line %d an unexpected empty-slot type.\n", 
       (*line_no) + 1);
     return false;
   }
@@ -1295,10 +1377,10 @@ parse_plan_size(char *line, alloc_plan_t *plan) {
   errno = 0;
   ret = strtol(line, NULL, 10);
   if(ret <= 0 || ret == ULONG_MAX || errno == EINVAL) {
-    printf(" !! Error, could not parse the plan size number in the first line\n");
+    log_fun(" !! Error, could not parse the plan size number in the first line\n");
     return false;
   } else {
-    printf(" !! Parsed plan size of %zu\n", ret);
+    log_fun(" !! Parsed plan size of %zu\n", ret);
     plan->plan_size = (size_t) ret;
     // preallocate the plan
     return perform_plan_prealloc(plan);
@@ -1312,18 +1394,18 @@ alloc_plan_t *
 import_alloc_plan(char *fname, alloc_plan_t *plan) {
   // check if filename is null
   if(fname == NULL) {
-    printf(" !! Error, cannot have null filename, cannot continue\n");
+    log_fun(" !! Error, cannot have null filename, cannot continue\n");
     return NULL;
   }
   // check if plan is null
   if(plan == NULL) {
-    printf(" !! Error, cannot have a null allocation plan, cannot continue\n");
+    log_fun(" !! Error, cannot have a null allocation plan, cannot continue\n");
     return NULL;
   }
   // open the file
   FILE *fp = fopen(fname, "r");
   if(fp == NULL) {
-    printf(" !! Error, failed to open the file at: %s for reading\n", fname);
+    log_fun(" !! Error, failed to open the file at: %s for reading\n", fname);
     return NULL;
   }
   plan->peak_alloc = 0;
@@ -1338,7 +1420,7 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
   bool ret = false;
   // loop through the file
   while((bytes_read = getline(&fline, &llen, fp)) != -1) {
-    //printf(" -- Parsing line %d of %zu bytes\n", lcnt+1, bytes_read);
+    //log_fun(" -- Parsing line %d of %zu bytes\n", lcnt+1, bytes_read);
     // checks for parse type
     if(lcnt == 0) {
       // parse first line, which preallocates the plan
@@ -1352,7 +1434,7 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
     }
     // check for possible errors
     if(!ret) {
-      printf(" !! Fatal parse error encountered at line %d, aborting\n", lcnt+1);
+      log_fun(" !! Fatal parse error encountered at line %d, aborting\n", lcnt+1);
       break;
     }
     // increment the line counter
@@ -1361,12 +1443,12 @@ import_alloc_plan(char *fname, alloc_plan_t *plan) {
 
   // perform the final checks
   if(lcnt-line_offset != plan->plan_size) {
-    printf(" !! Error, it appears that import file ops (%d) are \
+    log_fun(" !! Error, it appears that import file ops (%d) are \
 more than the parsed plan size (%zu)\n", lcnt-line_offset, plan->plan_size);
     ret = false;
   } else if(malloc_cnt != plan->plan_size / 2) {
-    printf(" !! Error, it appears that malloc counts (%d) is not \
-  equal to half plan size (%zu) \n", malloc_cnt, plan->plan_size / 2);
+    log_fun(" !! Error, it appears that malloc counts (%d) is not \
+equal to half plan size (%zu) \n", malloc_cnt, plan->plan_size / 2);
     ret = false;
   } 
 
@@ -1396,29 +1478,29 @@ print_plan(alloc_plan_t *plan) {
   size_t blk_cnt = 0;
   size_t block_id = 0;
   double exec_time = 0;
-  printf(" ** Printing allocation plan details (size %zu)\n", plan->plan_size);
+  log_fun(" ** Printing allocation plan details (size %zu)\n", plan->plan_size);
   for (int i = 0; i < plan->plan_size; ++i) {
     char *op_type = NULL;
     chunk_size = plan->block_size[i];
     exec_time = plan->timings[i];
-    //printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, idx, i);
+    //log_fun("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, idx, i);
     // differentiate allocation based on alloc/dealloc op
     if(plan->slot_type[i] == SLOT_FREE) {
       op_type = "free";
       free_chunk_size = plan->cur_malloc_size[block_id];
-      printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, free_chunk_size, exec_time, block_id, i);
+      log_fun("\t%s, %zu, %lf, %zu (%d)\n", op_type, free_chunk_size, exec_time, block_id, i);
     } else if(plan->slot_type[i] == SLOT_MALLOC) {
       op_type = "malloc";
-      printf("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, block_id, i);
+      log_fun("\t%s, %zu, %lf, %zu (%d)\n", op_type, chunk_size, exec_time, block_id, i);
       // sanity check
       assert(blk_cnt == block_id);
       // increment block
       blk_cnt++;
     } else {
-      printf(" !! Error, encountered empty slot on a full plan");
+      log_fun(" !! Error, encountered empty slot on a full plan");
     }
   }
-  printf(" ** End of allocation plan details print\n");
+  log_fun(" ** End of allocation plan details print\n");
 }
 
 /**
@@ -1429,7 +1511,7 @@ print_plan(alloc_plan_t *plan) {
 void 
 execute_plan(bool use_native_alloc) {
   // start hint
-  printf("\n ## Executing plan using %s allocator\n", 
+  log_fun("\n ## Executing plan using %s allocator\n", 
     use_native_alloc ? "native" : "tlsf");
   // return value
   bool ret = true;
@@ -1445,7 +1527,7 @@ execute_plan(bool use_native_alloc) {
 
   // check for result
   if(!ret) {
-    printf(" !! Error, could not generate a valid plan -- aborting\n");
+    log_fun(" !! Error, could not generate a valid plan -- aborting\n");
   }
 
   // now run the experiment
@@ -1462,7 +1544,7 @@ execute_plan(bool use_native_alloc) {
     wtlsf_t pool = {0};
     // create the pool
     if(create_tlsf_pool(&pool, pool_size) == NULL) {
-      printf(" !! Error, fatal error encountered when creating the pool\n");
+      log_fun(" !! Error, fatal error encountered when creating the pool\n");
       ret = false;
     } else {  
       // now run the bench
@@ -1480,16 +1562,16 @@ execute_plan(bool use_native_alloc) {
   // dump the plan
   if(dflag && ret) {
     if(use_native_alloc) {
-      dump_plan(&plan, dump_native_trace_suffix); 
+      dump_plan(&plan, fname_buf, dump_native_trace_suffix); 
     } else {
-      dump_plan(&plan, dump_tlsf_trace_suffix); 
+      dump_plan(&plan, fname_buf, dump_tlsf_trace_suffix); 
     }
   }
   
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
   // finish hint
-  printf(" ## Finished executing plan using %s allocator\n\n", 
+  log_fun(" ## Finished executing plan using %s allocator\n\n", 
     use_native_alloc ? "native" : "tlsf");
 }
 
@@ -1513,10 +1595,10 @@ bool cpu_pin(int core_id) {
   ret = pthread_setaffinity_np(tid, sizeof(cpu_set_t), &cpu_set);
   // check the result
   if(ret != 0) {
-    printf(" !! Error, could not set affinity on core %d with internal id: %d\n", 
+    log_fun(" !! Error, could not set affinity on core %d with internal id: %d\n", 
       core_id+1, core_id);
   } else {
-    printf(" ** Affinity set successful; using core %d with internal id: %d\n", 
+    log_fun(" ** Affinity set successful; using core %d with internal id: %d\n", 
       core_id+1, core_id);
   }
   return ret != 0;
@@ -1529,7 +1611,7 @@ void
 enum_cpu_cores() {
   core_count = get_nprocs_conf(); 
   core_count_avail = get_nprocs();
-  printf(" ** Detected %d number of cores out of which usable are: %d\n", 
+  log_fun(" ** Detected %d number of cores out of which usable are: %d\n", 
     core_count, core_count_avail);
 }
 
@@ -1542,7 +1624,7 @@ run_bench() {
   if(cflag) {
     cpu_pin(def_cpu_core_id);
   } else {
-    printf(" ** Using OS scheduled core affinity\n");
+    log_fun(" ** Using OS scheduled core affinity\n");
   }
 
   // benchmark type to run, currently we have three types
@@ -1574,22 +1656,63 @@ run_bench() {
 }
 
 /**
+ * This bootstraps the logging functionality and opens the respective file
+ * for writing
+ */
+bool
+bootstrap_logging(char *fname, char *suffix) {
+  log_fun(" -- Logging to file is: %s\n", lflag ? "ENABLED" : "DISABLED");
+  // return if we don't want logging
+  if(!lflag) {
+    return true;
+  }
+  // else create the required files
+  if(log_fp != NULL) {
+    log_fun(" !! Warning: non-null logging file pointer found, closing\n");
+    fclose(log_fp);
+  }
+  // try to create the file
+  log_fp = create_out_file(fname, suffix, log_ext, log_dir, "Logging", fpath_buf);
+  if(log_fp == NULL) {
+    log_fun(" !! Error: null file pointer on log creation, logging will be DISABLED\n");
+    lflag = false;
+    return false;
+  } else {
+    log_fun(" ** Output logging to file started now\n\n");
+  }
+  return true;
+}
+
+/**
  * Handle general initialization stuff.
  */
 bool
-boostrap(int argc, char **argv) {
-  printf("\n");
+bootstrap(int argc, char **argv) {
+  log_fun("\n");
   // initialize the random number generator
   srand(2);
-  // set the amount of cpu cores
-  enum_cpu_cores();
   // parse arguments
   if(!parse_args(argc, argv)) {
     return false;
   } 
+  // create the timestamp filename for use in logging and dump plan
+  create_iso8061_ts(fname_buf);
+  // boostrap logging
+  bootstrap_logging(fname_buf, NULL);
+  // set the amount of cpu cores
+  enum_cpu_cores();
   // notify of dump flag
-  printf(" ** Dumping traces is: %s\n", dflag ? "ENABLED" : "DISABLED");
+  log_fun(" ** Dumping traces is: %s\n", dflag ? "ENABLED" : "DISABLED");
   return true;
+}
+
+/**
+ * Final cleanup actions
+ */
+void
+cleanup() {
+  // clean up logging pointer if valid
+  close_tag_file(log_fp, "Logging file");
 }
 
 /**
@@ -1597,12 +1720,13 @@ boostrap(int argc, char **argv) {
  */
 int
 main(int argc, char **argv) {
-  if(!boostrap(argc, argv)) {
-    return EXIT_FAILURE;
+  if(!bootstrap(argc, argv)) { 
+    return EXIT_FAILURE; 
   }
   // run our benchmark
   run_bench();
-
+  // final cleanup
+  cleanup();
   // finally, return
   return EXIT_SUCCESS;
 }
