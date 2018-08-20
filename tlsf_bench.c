@@ -120,7 +120,7 @@ size_t def_trail = 100;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;        // min benchmark trials
-size_t bench_trials = 1000000; // benchmark trials
+size_t bench_trials = 100000000; // benchmark trials
 //size_t bench_trials = 600000000; // benchmark trials
 
 
