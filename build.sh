@@ -3,4 +3,4 @@
 # example supplied with it.
 
 
-autoreconf --install && ./configure && make all
+autoreconf --install && ./configure && make clean && make all

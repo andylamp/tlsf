@@ -10,13 +10,13 @@ are expected to have the following format:
 Usage:
     csv_mem_trace_plot.py [(-i FILE | --infile=FILE) (-f FVAL | --free_cutoff=FVAL) \
 (-m MVAL | --malloc_cutoff=MVAL) (-o DIR | --out_dir=DIR) (-c | --console)]
-    csv_mem_trace_plot.py (-i FILE | --in_file=FILE)
+    csv_mem_trace_plot.py (-i FILE | --infile=FILE)
     csv_mem_trace_plot.py (-h | --help)
     csv_mem_trace_plot.py (-v | --version)
 
 Arguments:
     -h --help                      show this message
-    -i FILE --in_file=FILE         import a specific trace file
+    -i FILE --infile=FILE          import a specific trace file
     -f FVAL --free_cutoff=FVAL     free op cutoff to count as "over budget" [default: 800].
     -m MVAL --malloc_cutoff=MVAL   malloc op cutoff to count as "over budget" [default: 2000].
     -o DIR --out_dir=DIR           location to save the generated plots [default: ./traces/].
