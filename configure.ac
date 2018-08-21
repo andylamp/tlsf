@@ -1,4 +1,4 @@
-AC_INIT([nio-tlsf], [0.2], [akritid@niometrics.com])
+AC_INIT([nio-tlsf], [0.3], [akritid@niometrics.com])
 
 # Library version information. This is different from the package version
 # defined above. Before updating, please read:
