@@ -97,6 +97,8 @@ typedef struct _alloc_plan_t {
   size_t aggregated_alloc;  // aggregated allocation for this plan
   // plan size
   size_t plan_size;         // the plan size
+  // data structure overhead
+  double ds_overhead;       // the data structure overhead
   // allocation plan type
   alloc_plan_type_t type;   // the plan type
 } alloc_plan_t;
@@ -121,7 +123,7 @@ size_t def_trail = 100;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;        // min benchmark trials
-size_t bench_trials = 1000000; // benchmark trials
+size_t bench_trials = 100000000; // benchmark trials
 //size_t bench_trials = 600000000; // benchmark trials
 
 
@@ -177,6 +179,9 @@ bool lflag = false; // logging flag
 
 // import plan (-p)
 char *imp_fname = NULL;
+
+// usage string
+const char *usage_str = "";
 
 /**
  * Functions
@@ -419,22 +424,26 @@ tag_blocks(alloc_plan_t *plan) {
 bool
 perform_plan_prealloc(alloc_plan_t *plan) {
   size_t plan_size = plan->plan_size;
+  size_t data_struct_overhead = 0;
   if(plan_size % 2 != 0) {
     log_fun(" !! Error, plan size must be even and contain as many allocs as deallocs\n");
     return false;
   }
   // block size array
+  data_struct_overhead += plan_size * sizeof(size_t);
   if((plan->block_size = calloc(plan_size, sizeof(size_t))) == NULL) {
     log_fun(" !! Failed to allocate block size\n");
     return false;
   }
   // timings array
+  data_struct_overhead += plan_size * sizeof(double);
   if((plan->timings = calloc(plan_size, sizeof(double))) == NULL) {
     log_fun(" !! Failed to allocate timings array\n");
     free(plan->block_size);
     return false;
   }
   // slot type array
+  data_struct_overhead += plan_size * sizeof(slot_type_t);
   if((plan->slot_type = calloc(plan_size, sizeof(slot_type_t))) == NULL) {
     log_fun(" !! Failed to allocate slot type array\n");
     free(plan->block_size);
@@ -442,6 +451,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     return false;
   }
   // cur_malloc_size array
+  data_struct_overhead += (plan_size / 2) * sizeof(size_t);
   if((plan->cur_malloc_size = calloc(plan_size / 2, sizeof(size_t))) == NULL) {
     log_fun(" !! Failed to allocate cur malloc size array\n");
     free(plan->block_size);
@@ -450,6 +460,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     return false;
   }
   // mem_ptr
+  data_struct_overhead += (plan_size / 2) * sizeof(char *);
   if((plan->mem_ptr = calloc(plan_size / 2, sizeof(char *))) == NULL) {
     log_fun(" !! Failed to allocate pointer array\n");
     free(plan->block_size);
@@ -459,6 +470,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     return false;
   }
   // malloc tag time
+  data_struct_overhead += (plan_size / 2) * sizeof(int);
   if((plan->malloc_tag_time = calloc(plan_size / 2, sizeof(int))) == NULL) {
     log_fun(" !! Failed to allocate malloc tag time array\n");
     free(plan->block_size);
@@ -469,6 +481,7 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     return false;
   }
   // block id
+  data_struct_overhead += plan_size * sizeof(size_t);
   if ((plan->block_id = calloc(plan_size, sizeof(size_t))) == NULL) {
     log_fun(" !! Failed to allocate block id array\n");
     free(plan->block_size);
@@ -479,8 +492,11 @@ perform_plan_prealloc(alloc_plan_t *plan) {
     free(plan->malloc_tag_time);
     return false;
   }
-
+  // add the parent data structure overhead
+  data_struct_overhead += sizeof(*plan);
+  plan->ds_overhead = (1.0*data_struct_overhead) / mb_div;
   log_fun(" ** Preallocated successfully a plan of size %zu\n", plan_size);
+  log_fun(" ** Data structure overhead is approximately: %lf MB\n", plan->ds_overhead);
   return true;
 }
 
