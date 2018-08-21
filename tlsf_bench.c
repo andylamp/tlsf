@@ -45,6 +45,7 @@
 
 #define MAX_FNAME_BUF 100
 #define MAX_FPATH_BUF 2000
+#define MAX_TIME_STR_BUF 200
 
 /* tlsf wrapper for convenience */
 typedef struct _wtlsf_t  {
@@ -120,7 +121,7 @@ size_t def_trail = 100;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;        // min benchmark trials
-size_t bench_trials = 100000000; // benchmark trials
+size_t bench_trials = 1000000; // benchmark trials
 //size_t bench_trials = 600000000; // benchmark trials
 
 
@@ -137,9 +138,13 @@ int core_count_avail = -1;
 // progress report divider 
 int prog_steps_div = 100000;
 
+// current time
+time_t cur_time;
+
 // print buffer
 char fname_buf[MAX_FNAME_BUF];
 char fpath_buf[MAX_FPATH_BUF];
+char time_str_buf[MAX_TIME_STR_BUF];
 
 // logging file pointer
 FILE *log_fp = NULL;
@@ -331,9 +336,9 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
   plan->aggregated_alloc = total_alloc_size;
   plan->peak_alloc = peak_alloc;
   // sanity check
-  assert(mem_alloc == plan->plan_size/2);
+  //assert(mem_alloc == plan->plan_size/2);
   // return the total allocation size for this plan
-  return total_alloc_size;
+  return mem_alloc != plan->plan_size/2 ? 0 : total_alloc_size;
 }
 
 /**
@@ -398,7 +403,7 @@ tag_blocks(alloc_plan_t *plan) {
     }
   }
   // total allocation size should not be zero
-  assert(total_alloc_size > 0);
+  //assert(total_alloc_size > 0);
   ret = total_alloc_size > 0;
   if(ret) {
     log_fun(" ** Final tags: %zu out of %zu \n", plan->plan_size/2, plan->plan_size);
@@ -865,7 +870,12 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
     plan->timings[i] = timed_seg;
     // report progress
     if(i % prog_steps_div == 0) {
-      log_fun(" -- Progress: completed %d out of %zu ops\n", i, plan->plan_size);
+      cur_time = time(NULL);
+      ctime_r(&cur_time, time_str_buf);
+      // remove new line
+      time_str_buf[strcspn(time_str_buf, "\r\n")] = 0;
+      log_fun(" -- Progress: completed %d out of %zu ops (Current time: %s)\n", 
+        i, plan->plan_size, time_str_buf);
     }
   }
   assert(mem_pivot == plan->plan_size / 2);
