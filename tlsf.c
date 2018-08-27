@@ -205,9 +205,8 @@ typedef struct block_header {
  		 * The last two bits are used for flags.
  		 */
 		size_t size;
-		/*
-		 * The heap this allocation belongs to
- 		 */
+
+		/* The heap this allocation belongs to */
 		tlsf_t *tlsf;
 	} metadata;
 
@@ -629,7 +628,8 @@ static void block_merge_prev(tlsf_t *tlsf, block_header_t **block)
 }
 
 /* Merge a just-freed block with an adjacent free block */
-// ASAN expect unpoisoned header for block, leave it unpoisoned
+// ASAN pre expect unpoisoned header for block
+// ASAN post leave it unpoisoned
 static void block_merge_next(tlsf_t *tlsf, block_header_t *block)
 {
 	block_header_t *next = block_next(block);
@@ -641,6 +641,8 @@ static void block_merge_next(tlsf_t *tlsf, block_header_t *block)
 		block_remove(tlsf, next);
 		block_absorb(block, next);
 	}
+
+	// Next block's metadata becomes free memory
 	ASAN_POISON_MEMORY_REGION(&next->metadata, sizeof(struct metadata));
 }
 
@@ -874,14 +876,18 @@ size_t tlsf_block_size(void *ptr)
 	return size;
 }
 
+// Disable address sanitizer to allow retrieval of the heap without
+// races with threads accessing adjacent allocations.
+// This allows wrappers around TLSF to use per-heap locks:
+// They find which lock to use by calling this function
+// without the need to hold a global lock
+ASAN_NO_SANITIZE_ADDRESS
 tlsf_t *tlsf_from_ptr(void *ptr)
 {
 	const block_header_t *block = block_from_ptr(ptr);
 	tlsf_t *tlsf;
 
-	ASAN_UNPOISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 	tlsf = block->metadata.tlsf;
-	ASAN_POISON_MEMORY_REGION(&block->metadata, sizeof(struct metadata));
 
 	return tlsf;
 }

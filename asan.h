@@ -27,9 +27,13 @@
 } while (0)
 #endif /* TRACE_ASAN */
 
+/* Attribute to disable address sanitizer per function */
+#define ASAN_NO_SANITIZE_ADDRESS __attribute__((no_sanitize_address))
+
 #else
 
 #define ASAN_POISON_MEMORY_REGION(addr, size)  ((void)(addr), (void)(size))
 #define ASAN_UNPOISON_MEMORY_REGION(addr, size) ((void)(addr), (void)(size))
+#define ASAN_NO_SANITIZE_ADDRESS
 
 #endif /* address_sanitizer */

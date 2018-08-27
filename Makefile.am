@@ -11,7 +11,7 @@ AM_CFLAGS = -Wall -std=gnu11 -g -O3
 lib_LTLIBRARIES = libnio-tlsf.la
 
 libnio_tlsf_la_LDFLAGS = -version-info $(TLSF_CURRENT):$(TLSF_REVISION):$(TLSF_AGE)
-libnio_tlsf_la_SOURCES = tlsf.c
+libnio_tlsf_la_SOURCES = tlsf.c asan.h
 
 include_HEADERS = tlsf.h
 
