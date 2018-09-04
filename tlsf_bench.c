@@ -847,12 +847,14 @@ create_tlsf_pool(wtlsf_t *pool, size_t size) {
   }
 
   // now, actually try to create tlsf
-  log_fun(" -- Attempting to create tlsf pool of size: %zu bytes \n", pool->size);
+  log_fun(" -- Attempting to create tlsf pool of size: %zu MB \n", 
+    (1.0*pool->size)/mb_div);
   pool->tlsf_ptr = tlsf_create_with_pool(pool->mem, pool->size);
   if(pool->tlsf_ptr == NULL) {
     log_fun(" !! Failed to create tlsf pool\n");
   } else {
-    log_fun(" -- Created a tlsf pool with size %zu bytes\n", pool->size);
+    log_fun(" -- Created a tlsf pool with size %zu MB\n", 
+      (1.0*pool->size)/mb_div);
   }
   return pool->tlsf_ptr;
 }
@@ -1103,11 +1105,11 @@ allocation of %lf MB; cannot continue\n",
   
   // basic info
   if(pool != NULL) {
-    log_fun(" -- Running %zu ops with a tlsf pool size of %zu bytes\n", 
-      plan->plan_size, pool->size);
+    log_fun(" -- Running %zu ops with a tlsf pool size of %zu MB\n", 
+      plan->plan_size, (1.0*pool->size)/mb_div);
   } else if(pool_ori != NULL) {
-    log_fun(" -- Running %zu ops with a tlsf original pool size of %zu bytes\n", 
-      plan->plan_size, pool_ori->size);
+    log_fun(" -- Running %zu ops with a tlsf original pool size of %zu MB\n", 
+      plan->plan_size, (1.0*pool_ori->size)/mb_div);
   } else {
     log_fun(" -- Running %zu ops using the native memory allocator\n", 
       plan->plan_size);
