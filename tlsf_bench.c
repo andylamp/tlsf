@@ -757,7 +757,7 @@ parse_args(int argc, char **argv) {
           char *endp;
           long t_trials = strtol(optarg, &endp, 0);
           if(t_trials == 0) {
-            log_fun(" !! Error, could not parse the suppled -t argument\n");
+            log_fun(" !! Error, could not parse the supplied -t argument\n");
             ret = false;
           } else if(optarg != endp && *endp == '\0') {
             if(t_trials < min_trials) {

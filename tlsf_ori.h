@@ -97,7 +97,7 @@
 
 // max fli sets the max size of the pool 2^32 = 4GB
 // max sli sets the number of lists
-#define MAX_FLI   (33)
+#define MAX_FLI   (32)
 #define MAX_LOG2_SLI  (7)
 #define MAX_SLI   (1 << MAX_LOG2_SLI)     /* MAX_SLI = 2^MAX_LOG2_SLI */
 
