@@ -161,6 +161,7 @@ int core_count = -1;
 int core_count_avail = -1;
 
 // progress report divider 
+int prog_num_steps = 10;
 int prog_steps_div = 10000000;
 //int prog_steps_div = bench_trials / 10;
 
@@ -765,6 +766,8 @@ parse_args(int argc, char **argv) {
             } else {
               log_fun(" ** Trials set to %zu\n", t_trials);
               bench_trials = (size_t) t_trials;
+              // set the reporting steps to be every 10 % (def)
+              prog_steps_div = bench_trials / prog_num_steps;
             }
           } else {
             log_fun(" !! Error: Invalid argument supplied, reverting to default\n");
