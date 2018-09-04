@@ -42,6 +42,8 @@
 
 /* tlsf lib */
 #include "tlsf.h"
+/* tlsf lib (original) */
+#include "tlsf_ori.h"
 
 #define MAX_FNAME_BUF 100
 #define MAX_FPATH_BUF 2000
@@ -53,6 +55,13 @@ typedef struct _wtlsf_t  {
   char *mem;
   size_t size;
 } wtlsf_t;
+
+/* tlsf original wrapper for convenience */
+typedef struct _wtlsf_ori_t {
+  //tlsf_ori_t *tlsf_ori_ptr;
+  char *mem;
+  size_t size;
+} wtlsf_ori_t;
 
 /* allocation plan types */
 typedef enum _alloc_plan_type_t {
@@ -75,8 +84,16 @@ typedef enum _slot_type_t {
 typedef enum _bench_type_t {
   BENCH_TLSF = 1,
   BENCH_NATIVE = 2,
-  BENCH_BOTH = 3,
+  BENCH_TLSF_ORI = 3,
+  BENCH_ALL = 4,
 } bench_type_t;
+
+/* type of allocator to use */
+typedef enum _use_alloc_type_t {
+  USE_TLSF = 1,
+  USE_TLSF_ORI = 2,
+  USE_NATIVE = 3,
+} use_alloc_type_t;
 
 /* allocation plan helper */
 typedef struct _alloc_plan_t {
@@ -97,6 +114,9 @@ typedef struct _alloc_plan_t {
   size_t aggregated_alloc;  // aggregated allocation for this plan
   // plan size
   size_t plan_size;         // the plan size
+  // min/max alloc. block size for plan
+  size_t min_block_size;
+  size_t max_block_size;
   // data structure overhead
   double ds_overhead;       // the data structure overhead
   // allocation plan type
@@ -116,16 +136,19 @@ size_t min_pool_size = 102400;  // default is 100Mb
 
 // request block size range
 size_t blk_mul_min = 1;             // min multiplier
-size_t blk_mul_max = 6400;          // max multiplier
+size_t blk_mul_max = 6400;          // max multiplier 6400
 
 // allocation configuration
 size_t def_trail = 100;          // default trail size
 
 // bench config (or 100000000)
 size_t min_trials = 1000;        // min benchmark trials
+//size_t bench_trials = 2000;      // benchmark trials
 size_t bench_trials = 100000000; // benchmark trials
 //size_t bench_trials = 600000000; // benchmark trials
 
+size_t wtlsf_struct_size = sizeof(wtlsf_t);
+size_t tlsf_ori_struct_size = sizeof(tlsf_ori_t);
 
 // file format details
 int line_offset = 2;    // line offset
@@ -138,7 +161,8 @@ int core_count = -1;
 int core_count_avail = -1;
 
 // progress report divider 
-int prog_steps_div = 100000;
+int prog_steps_div = 10000000;
+//int prog_steps_div = bench_trials / 10;
 
 // current time
 time_t cur_time;
@@ -155,12 +179,13 @@ FILE *log_fp = NULL;
 bench_type_t bench_type = BENCH_TLSF;
 
 // trace dump related
-char *dump_dir = "./traces";                            // dump directory
-char *dump_ext = "csv";                                 // dump extension
-char *log_dir = "./logs";                               // log directory
-char *log_ext = "log";                                  // log directory
-char *dump_tlsf_trace_suffix = "tlsf_mem_trace_out";    // tlsf suffix trace 
-char *dump_native_trace_suffix = "native_mem_trace_out";// native suffix trace 
+char *dump_dir = "./traces";                                  // dump directory
+char *dump_ext = "csv";                                       // dump extension
+char *log_dir = "./logs";                                     // log directory
+char *log_ext = "log";                                        // log directory
+char *dump_tlsf_trace_suffix = "tlsf_mem_trace_out";          // tlsf suffix trace 
+char *dump_tlsf_ori_trace_suffix = "tlsf_ori_mem_trace_out";  // tlsf ori. suffix trace
+char *dump_native_trace_suffix = "native_mem_trace_out";      // native suffix trace 
 
 // tokenizer related
 char *tok_delim_cm = ",";
@@ -181,7 +206,7 @@ bool lflag = false; // logging flag
 char *imp_fname = NULL;
 
 // usage string
-const char *usage_str = "";
+const char *usage_str = "\n    Usage: ./tlsf_bench -d -c ((-t ops) | (-p infile)) \n";
 
 /**
  * Functions
@@ -315,6 +340,13 @@ tag_seq(alloc_plan_t *plan, size_t trail_size) {
   for (int i = 0; i < plan->plan_size; i += 2*trail_size) {
     for(int j = i; j < i+trail_size; j++) {
       blk_size = block_gen();
+      // calculate block metrics
+      if(plan->min_block_size > blk_size) {
+        plan->min_block_size = blk_size;
+      }
+      if(plan->max_block_size < blk_size) {
+        plan->max_block_size = blk_size;
+      }
       cur_alloc_size += blk_size;
       // tag malloc block
       //log_fun(" -- Tagging malloc block at: %d with size of %zu bytes\n", j, blk_size);
@@ -382,7 +414,9 @@ bool
 tag_blocks(alloc_plan_t *plan) {
   size_t total_alloc_size = 0;
   bool ret = false;
-
+  // initialize the min/max block sizes
+  plan->min_block_size = min_block_size * blk_mul_max;
+  plan->max_block_size = 0; 
   // check plan types
   switch(plan->type) {
     case ALLOC_SEQ: {
@@ -413,7 +447,9 @@ tag_blocks(alloc_plan_t *plan) {
   if(ret) {
     log_fun(" ** Final tags: %zu out of %zu \n", plan->plan_size/2, plan->plan_size);
     log_fun(" -- Total plan pressure: %zu MB with peak allocation: %zu MB\n", 
-      total_alloc_size/mb_div, plan->peak_alloc/mb_div);    
+      total_alloc_size/mb_div, plan->peak_alloc/mb_div);   
+    log_fun(" -- Min/Max plan block size: %lf MB / %lf MB \n", 
+      1.0*plan->min_block_size / mb_div, 1.0*plan->max_block_size / mb_div); 
   }
   return ret;
 }
@@ -623,13 +659,18 @@ parse_args(int argc, char **argv) {
               break;
             }
             case 2: {
+              log_fun(" ** Benching TLSF ORI allocator only\n");
+              bench_type = BENCH_TLSF_ORI;
+              break;
+            }
+            case 3: {
               log_fun(" ** Benching NATIVE allocator only\n");
               bench_type = BENCH_NATIVE;
               break;
             }
-            case 3: {
-              log_fun(" ** Benching TLSF & NATIVE allocators\n");
-              bench_type = BENCH_BOTH;
+            case 4: {
+              log_fun(" ** Benching TLSF, TLSF_ORI, & NATIVE allocators\n");
+              bench_type = BENCH_ALL;
               break;
             }
             default: {
@@ -736,12 +777,12 @@ parse_args(int argc, char **argv) {
       // handle arguments that require a parameter
       case '?': {
         log_fun(" !! Error: argument -%c, requires an parameter\n", optopt);
-        log_fun("\n    Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
+        log_fun(usage_str);
         ret = false;
         break;
       }
       default: {
-        log_fun("   Usage: ./tlsfbench -d -c ((-t ops) | (-p infile)) \n");
+        log_fun(usage_str);
         ret = false;
         break;
       }
@@ -769,7 +810,7 @@ alloc_mem(size_t size) {
     log_fun(" !! Requested memory failed to yield, aborting\n");
     return NULL;
   } else {
-    log_fun(" -- Ghostly allocated memory of size: %zu bytes\n", size);
+    log_fun(" -- Ghostly allocated memory of size: %lf MB\n", 1.0*size / mb_div);
   }
   log_fun(" -- Warming up memory...\n");
   // forcefully request memory
@@ -778,7 +819,7 @@ alloc_mem(size_t size) {
     *mem_addr = 0;
     mem_addr++;
   }
-  log_fun(" -- Returning warmed-up memory of size: %zu bytes\n", size);
+  log_fun(" -- Returning warmed-up memory of size: %lf MB\n", 1.0*size / mb_div);
   return mem;
 }
 
@@ -817,13 +858,15 @@ create_tlsf_pool(wtlsf_t *pool, size_t size) {
 }
 
 /**
- * This function is responsible for destroying the tlsf pool structure
+ * @brief      This function is responsible for destroying the tlsf pool structure
+ *
+ * @param      pool  The tlsf pool pointer
  */
 void
 destroy_tlsf_pool(wtlsf_t *pool) {
   // check for valid input
   if(pool == NULL) {
-    log_fun(" !! Cannot destroy, no valid pool provided\n");
+    log_fun(" !! Cannot destroy tlsf pool, no valid pool provided\n");
     return;
   }
   log_fun(" -- Destroying tlsf pool of size %zu\n", pool->size);
@@ -834,6 +877,66 @@ destroy_tlsf_pool(wtlsf_t *pool) {
   // then free the memory block from the OS
   if(pool->mem) {
     free(pool->mem);
+    pool->mem = NULL;
+  }
+}
+
+
+/**
+ * @brief      Creates a tlsf original pool.
+ *
+ * @param      pool_ptr  The pool pointer
+ * @param[in]  size      The size
+ *
+ * @return     returns the actual pointer to pool structure
+ */
+wtlsf_ori_t *
+create_tlsf_ori_pool(wtlsf_ori_t *pool, size_t size) {
+  // check for valid input
+  if(pool == NULL) {
+    log_fun(" !! No valid tlsf original pointer provided\n");
+    return NULL;
+  }
+
+  // check for valid size
+  if(size < min_pool_size) {
+    log_fun(" !! Pool must be at be at least of size %zu, and requested %zu\n",
+      min_pool_size, size);
+  }
+  // set the size
+  pool->size = size;
+  // try to allocate (warm) memory
+  if((pool->mem = alloc_mem(pool->size)) == NULL) {
+    log_fun(" !! Failed to allocate and warm-up memory, cannot continue\n");
+    return NULL;
+  } else {
+    log_fun(" -- Created a tlsf original pool with size %zu bytes\n", pool->size);
+  }
+  // create the tlsf original pool;
+  return init_tlsf_ori_pool(pool->size, pool->mem) == -1 ? NULL : pool;
+}
+
+/**
+ * @brief      Destroy a tlsf original pool
+ *
+ * @param      pool  The pool pointer
+ */
+void
+destroy_tlsf_ori_pool(wtlsf_ori_t *pool) {
+  // check for valid input
+  if(pool == NULL) {
+    log_fun(" !! Cannot destroy tlsf ori pool, no valid pool pointer provided\n");
+    return;
+  }
+  log_fun(" -- Destroying tlsf ori pool\n");
+  // first delete the pool
+  if(pool->mem) {
+    del_tlsf_ori_pool(pool->mem);
+  }
+  // then free the memory block from the OS
+  if(pool->mem) {
+    free(pool->mem);
+    pool->mem = NULL;
   }
 }
 
@@ -844,14 +947,22 @@ destroy_tlsf_pool(wtlsf_t *pool) {
  */
 
 /**
- * Execute the sequential plan
+ * @brief      The sequential benchmark routine, which executed the respective
+ *             plan using either tlsf, tlsf original, and native allocators.
+ *
+ * @param      pool      The tlsf pool, if NULL it's skipped
+ * @param      ori_pool  The original tlsf pool, if NULL it's skipped
+ * @param      plan      A valid and initialized allocation plan
  */
 void
-bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_seq(wtlsf_t *pool, wtlsf_ori_t *ori_pool, alloc_plan_t *plan) {
   log_fun(" !! Running a SEQUENTIAL plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
   unsigned long long t_ctx = 0;
+
+  //printf("Pool NULL: %s, Ori Pool NULL: %s\n", pool == NULL ? "YES" : "NO", ori_pool == NULL ? "YES" : "NO");
+
   for (int i = 0; i < plan->plan_size; ++i) {
     t_ctx = tic(NULL);
     // check if we have an allocation
@@ -860,6 +971,8 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
       //  i, plan->block_size[i]);
       if(pool != NULL) {
         plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);  
+      } else if(ori_pool != NULL) {
+        plan->mem_ptr[mem_pivot] = malloc_ex(plan->block_size[i], ori_pool->mem);
       } else {
         plan->mem_ptr[mem_pivot] = malloc(plan->block_size[i]);
       }
@@ -870,6 +983,8 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
       //log_fun(" -- Freeing block at %d\n", free_blk);
       if(pool != NULL) {
         tlsf_free(pool->tlsf_ptr, plan->mem_ptr[free_blk]);
+      } else if(ori_pool != NULL) {
+        free_ex(plan->mem_ptr[free_blk], ori_pool->mem);
       } else {
         free(plan->mem_ptr[free_blk]);
       }
@@ -901,7 +1016,7 @@ bench_seq(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute the ramp plan
  */
 void
-bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_ramp(wtlsf_t *pool, wtlsf_ori_t *ori_pool, alloc_plan_t *plan) {
   log_fun(" !! Running a RAMP plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
@@ -910,7 +1025,7 @@ bench_ramp(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute the hammer plan
  */
 void 
-bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_hammer(wtlsf_t *pool, wtlsf_ori_t *ori_pool, alloc_plan_t *plan) {
   log_fun(" !! Running a HAMMER plan type of size: %zu\n", plan->plan_size);
   //TODO
 }
@@ -919,7 +1034,7 @@ bench_hammer(wtlsf_t *pool, alloc_plan_t *plan) {
  * Execute a scripted custom plan from file import
  */
 void
-bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
+bench_custom(wtlsf_t *pool, wtlsf_ori_t *ori_pool, alloc_plan_t *plan) {
   log_fun(" !! Running a CUSTOM plan type of size: %zu\n", plan->plan_size);
   int mem_pivot = 0;
   double timed_seg = 0;
@@ -929,7 +1044,10 @@ bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
     if(plan->slot_type[i] == SLOT_MALLOC) {
       // allocate the block to the designated slot
       if(pool != NULL) {
-        plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, plan->block_size[i]);        
+        plan->mem_ptr[mem_pivot] = tlsf_malloc(pool->tlsf_ptr, 
+        plan->block_size[i]);        
+      } else if(ori_pool != NULL) {
+        plan->mem_ptr[mem_pivot] = malloc_ex(plan->block_size[i], ori_pool->mem);  
       } else {
         plan->mem_ptr[mem_pivot] = malloc(plan->block_size[i]);
       }
@@ -939,6 +1057,8 @@ bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
       // free the block
       if(pool != NULL) {
         tlsf_free(pool->tlsf_ptr, plan->mem_ptr[plan->block_id[i]]);
+      } else if(ori_pool != NULL) {
+        free_ex(plan->mem_ptr[plan->block_id[i]], ori_pool->mem);
       } else {
         free(plan->mem_ptr[plan->block_id[i]]);
       }
@@ -960,8 +1080,7 @@ bench_custom(wtlsf_t *pool, alloc_plan_t *plan) {
  * are comprised out of malloc/free pairs.
  */
 void
-mem_bench(wtlsf_t *pool, alloc_plan_t *plan) {
-  
+mem_bench(wtlsf_t *pool, wtlsf_ori_t *pool_ori, alloc_plan_t *plan) {
   // check if plan is null
   if(plan == NULL || plan->peak_alloc == 0 || plan->aggregated_alloc == 0) {
     log_fun(" !! Error allocation plan cannot be NULL, cannot continue\n");
@@ -969,18 +1088,26 @@ mem_bench(wtlsf_t *pool, alloc_plan_t *plan) {
   }
 
   // check if pool is null -- we either use native allocator or the tlsf pool
-  if(pool == NULL) {
+  if(pool == NULL && pool_ori == NULL) {
     log_fun(" ** Null pool detected, using native allocator\n");
   } else if (pool != NULL && plan->peak_alloc > pool->size) {
-    log_fun(" !! Error, pool size of %zu is too small to satisfy peak allocation \
-of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
+    log_fun(" !! Error, pool size of %lf MB is too small to satisfy peak allocation \
+of %lf MB; cannot continue\n", pool->size/1.0*mb_div, plan->peak_alloc/1.0*mb_div);
+    return;
+  } else if(pool_ori != NULL && plan->peak_alloc > pool_ori->size) {
+    log_fun(" !! Error, tlsf ori pool size of %lf MB is too small to satisfy peak \
+allocation of %lf MB; cannot continue\n", 
+(1.0*pool_ori->size)/mb_div, (1.0*plan->peak_alloc)/mb_div);
     return;
   }
   
   // basic info
   if(pool != NULL) {
-    log_fun(" -- Running %zu ops with a pool size of %zu bytes\n", 
+    log_fun(" -- Running %zu ops with a tlsf pool size of %zu bytes\n", 
       plan->plan_size, pool->size);
+  } else if(pool_ori != NULL) {
+    log_fun(" -- Running %zu ops with a tlsf original pool size of %zu bytes\n", 
+      plan->plan_size, pool_ori->size);
   } else {
     log_fun(" -- Running %zu ops using the native memory allocator\n", 
       plan->plan_size);
@@ -989,23 +1116,23 @@ of %zu; cannot continue\n", pool->size/mb_div, plan->peak_alloc/mb_div);
   // execute the sequential plan
   switch(plan->type) {
     case ALLOC_SEQ: {
-      bench_seq(pool, plan);
+      bench_seq(pool, pool_ori, plan);
       break;
     }
     case ALLOC_RAMP: {
-      bench_ramp(pool, plan);
+      bench_ramp(pool, pool_ori, plan);
       break;
     }
     case ALLOC_HAMMER: {
-      bench_hammer(pool, plan);
+      bench_hammer(pool, pool_ori, plan);
       break;
     }
     case ALLOC_CUSTOM: {
-      bench_custom(pool, plan);
+      bench_custom(pool, pool_ori, plan);
       break;
     }
     default: {
-      bench_seq(pool, plan);
+      bench_seq(pool, pool_ori, plan);
       break;
     }
   }
@@ -1535,10 +1662,19 @@ print_plan(alloc_plan_t *plan) {
  * an existing trace.
  */
 void 
-execute_plan(bool use_native_alloc) {
+execute_plan(use_alloc_type_t alloc_type) {
   // start hint
-  log_fun("\n ## Executing plan using %s allocator\n", 
-    use_native_alloc ? "native" : "tlsf");
+  if(alloc_type == USE_TLSF) {
+    log_fun("\n ## Executing plan using tlsf allocator\n\n");    
+  } else if(alloc_type == USE_TLSF_ORI) {
+    log_fun("\n ## Executing plan using tlsf (original) allocator\n\n");
+  } else if(alloc_type == USE_NATIVE) {
+    log_fun("\n ## Executing plan using native allocator\n\n");   
+  } else {
+    log_fun("\n !! Unknown allocation type -- cannot continue plan execution.\n\n");
+    return;
+  }
+
   // return value
   bool ret = true;
   // our plan structure
@@ -1553,7 +1689,7 @@ execute_plan(bool use_native_alloc) {
 
   // check for result
   if(!ret) {
-    log_fun(" !! Error, could not generate a valid plan -- aborting\n");
+    log_fun(" !! Error: could not generate a valid plan -- aborting\n");
   }
 
   // now run the experiment
@@ -1562,21 +1698,33 @@ execute_plan(bool use_native_alloc) {
   clock_t s_ctx = tic_s(stag);
   unsigned long long c_ctx = tic(ctag);
 
-  if(use_native_alloc) {
+  if(alloc_type == USE_NATIVE) {
     // use the native allocator
-    mem_bench(NULL, &plan);
-  } else {
+    mem_bench(NULL, NULL, &plan);
+  } else if(alloc_type == USE_TLSF) {
     // declare our pool structure
     wtlsf_t pool = {0};
     // create the pool
     if(create_tlsf_pool(&pool, pool_size) == NULL) {
-      log_fun(" !! Error, fatal error encountered when creating the pool\n");
+      log_fun(" !! Error: fatal error encountered when creating the pool\n");
       ret = false;
     } else {  
       // now run the bench
-      mem_bench(&pool, &plan);
+      mem_bench(&pool, NULL, &plan);
       // destroy the pool
       destroy_tlsf_pool(&pool);
+    }
+  } else if(alloc_type == USE_TLSF_ORI) {
+    // declare our pool structure
+    wtlsf_ori_t tlsf_ori_pool = {0};
+    if(create_tlsf_ori_pool(&tlsf_ori_pool, pool_size) == NULL) {
+      log_fun(" !! Error: fatal error encountered when creating the tlsf_ori pool\n");
+      ret = false;
+    } else {
+      // now run the bench for tlsf original
+      mem_bench(NULL, &tlsf_ori_pool, &plan);
+      // destroy the pool
+      destroy_tlsf_ori_pool(&tlsf_ori_pool);      
     }
   }
 
@@ -1587,25 +1735,32 @@ execute_plan(bool use_native_alloc) {
 
   // dump the plan
   if(dflag && ret) {
-    if(use_native_alloc) {
+    if(alloc_type == USE_NATIVE) {
       dump_plan(&plan, fname_buf, dump_native_trace_suffix); 
-    } else {
+    } else if(alloc_type == USE_TLSF) {
       dump_plan(&plan, fname_buf, dump_tlsf_trace_suffix); 
+    } else if(alloc_type == USE_TLSF_ORI) {
+      dump_plan(&plan, fname_buf, dump_tlsf_ori_trace_suffix);  
     }
   }
   
   // finally destroy the allocation plan
   destroy_alloc_plan(&plan);
   // finish hint
-  log_fun(" ## Finished executing plan using %s allocator\n\n", 
-    use_native_alloc ? "native" : "tlsf");
+  if(alloc_type == USE_TLSF) {
+    log_fun("\n ## Finished executing plan using tlsf allocator\n");    
+  } else if(alloc_type == USE_TLSF_ORI) {
+    log_fun("\n ## Finished executing plan using tlsf (original) allocator\n");
+  } else if(alloc_type == USE_NATIVE) {
+    log_fun("\n ## Finished executing plan using native allocator\n");   
+  }
 }
 
 /**
  * Function that pins the current thread to a certain CPU id as 
  * defined by `core_id`
  * @param  core_id cpu id to pin
- * @return         true if successful, false otherwise
+ * @return true if successful, false otherwise
  */
 bool cpu_pin(int core_id) {
   int ret = 0;
@@ -1658,24 +1813,31 @@ run_bench() {
   switch(bench_type) {
     case BENCH_TLSF: {
       // use tlsf allocator
-      execute_plan(false);
+      execute_plan(USE_TLSF);
       break;
     }
     case BENCH_NATIVE: {
       // use native allocator
-      execute_plan(true);
+      execute_plan(USE_NATIVE);
       break;
     }
-    case BENCH_BOTH: {
+    case BENCH_TLSF_ORI: {
+      // use tlsf original allocator
+      execute_plan(USE_TLSF_ORI);
+      break;
+    }
+    case BENCH_ALL: {
       // use native allocator
-      execute_plan(true);
+      execute_plan(USE_NATIVE);
       // use tlsf allocator
-      execute_plan(false);
+      execute_plan(USE_TLSF);
+      // use tlsf original allocator
+      execute_plan(USE_TLSF_ORI);
       break;
     }
     default: {
       // use tlsf allocator
-      execute_plan(false);
+      execute_plan(USE_TLSF);
       break;
     }
   }

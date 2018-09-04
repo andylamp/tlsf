@@ -43,4 +43,4 @@ traces/
 *.la
 *.pc
 example
-tlsfbench
+tlsf_bench
