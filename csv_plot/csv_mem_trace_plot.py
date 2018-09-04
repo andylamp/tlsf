@@ -60,6 +60,8 @@ def parse_file(f):
     :param f: file path of the trace file
     :return: nothing
     """
+    fname_base = basename(f)
+    print(" -- Parsing filename: {}".format(fname_base))
     global out_dir
     with open(f, 'r') as csv_fp:
         csv_reader = csv.reader(csv_fp)
@@ -89,7 +91,6 @@ def parse_file(f):
                 free_chunk_len.append(c_chunk)
                 if c_tim > free_cutoff:
                     free_spikes += 1
-        fname_base = basename(f)
         plot_hist2d(fname_base + "_malloc", out_dir, "malloc ops", malloc_len, malloc_chunk_len, 40)
         plot_hist2d(fname_base + "_free", out_dir, "free ops", free_len, free_chunk_len, 40)
         plot_hist_comb(fname_base, out_dir, malloc_len, free_len, "malloc", "free", 20)
@@ -525,10 +526,10 @@ def handle_three_traces(same_run=True):
     # plot the histograms
     fname = "{}_native_vs_tlsf_vs_tlsf_ori_malloc_op".format(tok1)
     plot_hist_triple_log(fname, out_dir, malloc_len_a, "tlsf", malloc_len_b, "tlsf_ori",
-                         malloc_len_c, "native", 40, title_tag=40, onlylog=True)
+                         malloc_len_c, "native", 40, title_tag="malloc", onlylog=True)
     fname = "{}_native_vs_tlsf_vs_tlsf_ori_free_op".format(tok1)
     plot_hist_triple_log(fname, out_dir, free_len_a, "tlsf", free_len_b, "tlsf_ori",
-                         free_len_c, "native", 40, title_tag=40, onlylog=True)
+                         free_len_c, "native", 40, title_tag="free", onlylog=True)
 
 
 
