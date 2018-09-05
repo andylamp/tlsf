@@ -96,8 +96,8 @@ def parse_file(f):
         plot_hist_comb(fname_base, out_dir, malloc_len, free_len, "malloc", "free", 20)
         #plot_hist_comb_log(fname_base, out_dir, malloc_len, "malloc", free_len, "free", title_tag="native", bins=40)
         total_ops = len(malloc_len) + len(free_len)
+        print(" -- Finished parsing file: {}".format(fname_base))
         print(" ** Trace aggregate statistics")
-        print(" -- Parsed filename: {}".format(fname_base))
         print(" -- Cutoff threshold (in cycles): {} cycles for free and {} cycles for malloc"
               .format(free_cutoff, malloc_cutoff))
         print("\t --- Total spikes: {} out of {} ops".format(malloc_spikes + free_spikes, total_ops))
