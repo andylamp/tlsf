@@ -207,7 +207,15 @@ bool lflag = false; // logging flag
 char *imp_fname = NULL;
 
 // usage string
-const char *usage_str = "\n    Usage: ./tlsf_bench -d -c ((-t ops) | (-p infile)) \n";
+const char *usage_str = "\nExample Usage: ./tlsf_bench args \n\
+Available arguments:\n\
+ -d: enable trace dump\n\
+ -c core_id: set affinity to a specific core\n\
+ -t ops: the number of ops to run (must be > min ops)\n\
+ -p infile: parse and execute a plan\n\
+ -t trial_flag: custom trial (tlsf: 1, native: 2, tlsf_ori: 3, all: 4)\n\
+ -i: interactive, see progress every 10 %\n\
+ -l: enable runtime logging to file\n";
 
 /**
  * Functions
